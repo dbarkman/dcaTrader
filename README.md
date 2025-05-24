@@ -241,13 +241,59 @@ python main_app.py
 
 ## **7\. Running Tests**
 
-### **7.1. Functional Tests**
+### **7.1. Setup**
 
-(Details on how to run functional tests will be provided as they are developed, typically using a test runner like pytest).
+Make sure your virtual environment is properly activated:
 
-### **7.2. Integration Tests**
+```bash
+source venv/bin/activate
+# Verify python points to venv:
+which python  # Should show: ~/dcaTrader/venv/bin/python
+```
 
-The integration test script (integration_test.py) is designed to be run against your Alpaca Paper Trading account.
+If needed, install test dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+### **7.2. Running Tests**
+
+#### **Using the test runner script (recommended):**
+
+```bash
+python run_tests.py all          # Run all tests
+python run_tests.py unit         # Run only unit tests  
+python run_tests.py coverage     # Run with coverage report
+python run_tests.py html         # Generate HTML coverage report
+python run_tests.py integration  # Run integration tests
+python run_tests.py fast         # Run tests without coverage
+python run_tests.py verbose      # Run with verbose output
+```
+
+#### **Using pytest directly:**
+
+```bash
+python -m pytest tests/ -v                    # Run all tests
+python -m pytest tests/ -m unit              # Run only unit tests
+python -m pytest tests/ --cov=src            # Run with coverage
+python -m pytest tests/ --cov=src --cov-report=html  # HTML coverage report
+```
+
+### **7.3. Test Organization**
+
+- **Unit tests**: Use `@pytest.mark.unit` - test individual functions with mocking
+- **Integration tests**: Use `@pytest.mark.integration` - test end-to-end scenarios
+- **Slow tests**: Use `@pytest.mark.slow` - tests that take longer to run
+- **DB tests**: Use `@pytest.mark.db` - tests requiring database connection
+
+### **7.4. Coverage Reports**
+
+- Terminal coverage: Shows percentage and missing lines
+- HTML coverage: Generated in `htmlcov/index.html` - open in browser for detailed view
+
+### **7.5. Integration Testing**
+
+The integration test script (`integration_test.py`) is designed to be run against your Alpaca Paper Trading account:
 
 ```bash
 source venv/bin/activate
@@ -255,5 +301,11 @@ python integration_test.py
 ```
 
 This script will perform setup (potentially clearing DB tables and Alpaca positions/orders for a clean test environment), run test scenarios, make assertions, and then perform teardown. It will provide verbose output.
+
+### **7.6. Current Status**
+
+- ✅ 34 tests passing
+- ✅ 84% code coverage  
+- ✅ All Phase 1 functionality tested
 
 *This README provides a foundational overview. Specific script names and detailed commands may evolve during development.*
