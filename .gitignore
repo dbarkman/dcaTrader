@@ -1,0 +1,36 @@
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Environment Variables
+.env
+.env.local
+.env.production
+
+# Testing & Coverage
+.pytest_cache/
+htmlcov/
+.coverage
+*.cover
+
+# Logs
+logs/
+*.log
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project Specific
+*.pid 

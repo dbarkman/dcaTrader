@@ -1,0 +1,1 @@
+# DCA Trading Bot - Main source package 
