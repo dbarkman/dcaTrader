@@ -27,7 +27,7 @@ The core strategy involves placing an initial base order for a configured crypto
 ## **3\. Technology Stack**
 
 * **Programming Language:** Python 3.x  
-* **Exchange API:** Alpaca (alpaca-py SDK) \- primarily WebSockets, with REST API for order placement and specific queries.  
+* **Exchange API:** Alpaca (alpaca-py SDK) - primarily WebSockets, with REST API for order placement and specific queries.  
 * **Database:** MySQL / MariaDB  
 * **Scheduling:** cron (for caretaker scripts and watchdog)  
 * **Key Python Libraries (anticipated):**  
@@ -60,147 +60,184 @@ The core strategy involves placing an initial base order for a configured crypto
 ### **5.2. Initial Setup**
 
 1. **Clone the Repository:**
-```
-   git clone \<repository\_url\>  
-   cd \<repository\_name\>
-```
-
-2. **Create Python Virtual Environment:**  
-```
-   python \-m venv venv  
-   source venv/bin/activate  \# On Windows: venv\\Scripts\\activate
+```bash
+git clone <repository_url>
+cd <repository_name>
 ```
 
-3. **Install Dependencies:**  
-```
-   pip install \-r requirements.txt
+2. **Create Python Virtual Environment:**
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 ```
 
-   *(A requirements.txt file will be created as part of the development process).*  
-4. **Database Setup:**  
-   * Create a new database in MySQL/MariaDB (e.g., dca\_bot\_db).  
-   * Create a database user with appropriate permissions for this database.  
+3. **Install Dependencies:**
+```bash
+pip install -r requirements.txt
+```
+
+   *(A requirements.txt file will be created as part of the development process).*
+4. **Database Setup:**
+   * Create a new database in MySQL/MariaDB (e.g., dca_bot_db).
+   * Create a database user with appropriate permissions for this database.
    * Execute the following SQL DDL statements to create the necessary tables:
 
-**Table: dca\_assets** (Stores configuration for tradable assets)
+**Table: dca_assets** (Stores configuration for tradable assets)
 ```sql
-CREATE TABLE dca\_assets (  
-    id INT AUTO\_INCREMENT PRIMARY KEY,  
-    asset\_symbol VARCHAR(25) NOT NULL UNIQUE, \-- e.g., 'BTC/USD'  
-    is\_enabled BOOLEAN NOT NULL DEFAULT TRUE,  
-    base\_order\_amount DECIMAL(20, 10\) NOT NULL,  
-    safety\_order\_amount DECIMAL(20, 10\) NOT NULL,  
-    max\_safety\_orders INT NOT NULL,  
-    safety\_order\_deviation DECIMAL(10, 4\) NOT NULL, \-- Percentage price drop to trigger safety order  
-    take\_profit\_percent DECIMAL(10, 4\) NOT NULL, \-- Percentage price rise from avg purchase price to trigger sell  
-    cooldown\_period INT NOT NULL, \-- Seconds after a take profit  
-    buy\_order\_price\_deviation\_percent DECIMAL(10, 4\) NOT NULL, \-- Percent down from last sell to start new cycle (preempts cooldown)  
-    last\_sell\_price DECIMAL(20, 10\) NULL, \-- Price of the last successful take-profit sell for this asset  
-    created\_at TIMESTAMP DEFAULT CURRENT\_TIMESTAMP,  
-    updated\_at TIMESTAMP DEFAULT CURRENT\_TIMESTAMP ON UPDATE CURRENT\_TIMESTAMP  
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
-**Table: dca\_cycles** (Stores data for each trading cycle of an asset)
-```sql
-CREATE TABLE dca\_cycles (  
-    id INT AUTO\_INCREMENT PRIMARY KEY,  
-    asset\_id INT NOT NULL,  
-    status VARCHAR(20) NOT NULL, \-- e.g., 'watching', 'buying', 'selling', 'cooldown', 'complete', 'error'  
-    quantity DECIMAL(30, 15\) NOT NULL DEFAULT 0, \-- Total quantity of the asset held in this cycle  
-    average\_purchase\_price DECIMAL(20, 10\) NOT NULL DEFAULT 0, \-- Weighted average purchase price for this cycle  
-    safety\_orders INT NOT NULL DEFAULT 0, \-- Number of safety orders filled in this cycle  
-    latest\_order\_id VARCHAR(255) NULL, \-- Alpaca order ID of the most recent order for this cycle  
-    last\_order\_fill\_price DECIMAL(20, 10\) NULL, \-- Fill price of the most recent BUY order in this cycle  
-    completed\_at TIMESTAMP NULL, \-- Timestamp when the cycle reached a terminal status ('complete', 'error')  
-    created\_at TIMESTAMP DEFAULT CURRENT\_TIMESTAMP,  
-    updated\_at TIMESTAMP DEFAULT CURRENT\_TIMESTAMP ON UPDATE CURRENT\_TIMESTAMP,  
-    FOREIGN KEY (asset\_id) REFERENCES dca\_assets(id) ON DELETE CASCADE  
+CREATE TABLE dca_assets (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    asset_symbol VARCHAR(25) NOT NULL UNIQUE,
+    is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    base_order_amount DECIMAL(20, 10) NOT NULL,
+    safety_order_amount DECIMAL(20, 10) NOT NULL,
+    max_safety_orders INT NOT NULL,
+    safety_order_deviation DECIMAL(10, 4) NOT NULL,
+    take_profit_percent DECIMAL(10, 4) NOT NULL,
+    cooldown_period INT NOT NULL,
+    buy_order_price_deviation_percent DECIMAL(10, 4) NOT NULL,
+    last_sell_price DECIMAL(20, 10) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-5. Configure Environment Variables:  
-   Create a .env file in the project root directory with your Alpaca API keys and database credentials:  
-   ```
-   \# Alpaca API Credentials  
-   APCA\_API\_KEY\_ID="YOUR\_ALPACA\_API\_KEY\_ID"  
-   APCA\_API\_SECRET\_KEY="YOUR\_ALPACA\_API\_SECRET\_KEY"  
-   APCA\_API\_BASE\_URL="https://paper-api.alpaca.markets" \# For paper trading  
-   \# APCA\_API\_BASE\_URL="https://api.alpaca.markets" \# For live trading
+Comments for dca_assets table:
+- `asset_symbol`: e.g., 'BTC/USD'
+- `safety_order_deviation`: Percentage price drop to trigger safety order
+- `take_profit_percent`: Percentage price rise from avg purchase price to trigger sell
+- `cooldown_period`: Seconds after a take profit
+- `buy_order_price_deviation_percent`: Percent down from last sell to start new cycle (preempts cooldown)
+- `last_sell_price`: Price of the last successful take-profit sell for this asset
 
-   \# Database Credentials  
-   DB\_HOST="localhost"  
-   DB\_USER="your\_db\_user"  
-   DB\_PASSWORD="your\_db\_password"  
-   DB\_NAME="dca\_bot\_db"  
-   DB\_PORT="3306" \# Or your MySQL/MariaDB port
-
-   \# Watchdog Email Alert Configuration (Optional)  
-   ALERT\_EMAIL\_SENDER="your\_sender\_email@example.com"  
-   ALERT\_EMAIL\_RECEIVER="your\_receiver\_email@example.com"  
-   ALERT\_EMAIL\_SMTP\_SERVER="smtp.example.com"  
-   ALERT\_EMAIL\_SMTP\_PORT=587  
-   ALERT\_EMAIL\_SMTP\_USER="your\_smtp\_user" \# Often same as sender  
-   ALERT\_EMAIL\_SMTP\_PASSWORD="your\_smtp\_password"
+**Table: dca_cycles** (Stores data for each trading cycle of an asset)
+```sql
+CREATE TABLE dca_cycles (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    asset_id INT NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    quantity DECIMAL(30, 15) NOT NULL DEFAULT 0,
+    average_purchase_price DECIMAL(20, 10) NOT NULL DEFAULT 0,
+    safety_orders INT NOT NULL DEFAULT 0,
+    latest_order_id VARCHAR(255) NULL,
+    last_order_fill_price DECIMAL(20, 10) NULL,
+    completed_at TIMESTAMP NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (asset_id) REFERENCES dca_assets(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
-   *Ensure this .env file is added to your .gitignore to prevent committing sensitive credentials.*  
-6. Populate dca\_assets Table:  
-   Manually insert rows into the dca\_assets table for the cryptocurrencies you want the bot to trade. For example:  
-   ```
-   INSERT INTO dca\_assets (  
-       asset\_symbol, is\_enabled, base\_order\_amount, safety\_order\_amount,  
-       max\_safety\_orders, safety\_order\_deviation, take\_profit\_percent,  
-       cooldown\_period, buy\_order\_price\_deviation\_percent  
-   ) VALUES (  
-       'BTC/USD', TRUE, 20.00, 20.00, \-- Base and Safety order amounts in USD  
-       5, 1.5, 1.0, \-- Max 5 safety orders, 1.5% drop for SO, 1.0% take profit  
-       300, 2.0 \-- 300s (5 min) cooldown, 2% drop from last sell to restart early  
-   );
-   ```
+Comments for dca_cycles table:
+- `status`: e.g., 'watching', 'buying', 'selling', 'cooldown', 'complete', 'error'
+- `quantity`: Total quantity of the asset held in this cycle
+- `average_purchase_price`: Weighted average purchase price for this cycle
+- `safety_orders`: Number of safety orders filled in this cycle
+- `latest_order_id`: Alpaca order ID of the most recent order for this cycle
+- `last_order_fill_price`: Fill price of the most recent BUY order in this cycle
+- `completed_at`: Timestamp when the cycle reached a terminal status ('complete', 'error')
+
+5. Configure Environment Variables:
+   Create a .env file in the project root directory with your Alpaca API keys and database credentials:
+   
+```env
+# Alpaca API Credentials
+APCA_API_KEY_ID="YOUR_ALPACA_API_KEY_ID"
+APCA_API_SECRET_KEY="YOUR_ALPACA_API_SECRET_KEY"
+APCA_API_BASE_URL="https://paper-api.alpaca.markets"
+# APCA_API_BASE_URL="https://api.alpaca.markets"
+
+# Database Credentials
+DB_HOST="localhost"
+DB_USER="your_db_user"
+DB_PASSWORD="your_db_password"
+DB_NAME="dca_bot_db"
+DB_PORT="3306"
+
+# Watchdog Email Alert Configuration (Optional)
+ALERT_EMAIL_SENDER="your_sender_email@example.com"
+ALERT_EMAIL_RECEIVER="your_receiver_email@example.com"
+ALERT_EMAIL_SMTP_SERVER="smtp.example.com"
+ALERT_EMAIL_SMTP_PORT=587
+ALERT_EMAIL_SMTP_USER="your_smtp_user"
+ALERT_EMAIL_SMTP_PASSWORD="your_smtp_password"
+```
+
+   Configuration notes:
+   - For paper trading, use `https://paper-api.alpaca.markets`
+   - For live trading, use `https://api.alpaca.markets` 
+   - Or your MySQL/MariaDB port for `DB_PORT`
+   - Often same as sender for `ALERT_EMAIL_SMTP_USER`
+   - Ensure this .env file is added to your .gitignore to prevent committing sensitive credentials.
+
+6. Populate dca_assets Table:
+   Manually insert rows into the dca_assets table for the cryptocurrencies you want the bot to trade. For example:
+   
+```sql
+INSERT INTO dca_assets (
+    asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+    max_safety_orders, safety_order_deviation, take_profit_percent,
+    cooldown_period, buy_order_price_deviation_percent
+) VALUES (
+    'BTC/USD', TRUE, 20.00, 20.00,
+    5, 1.5, 1.0,
+    300, 2.0
+);
+```
+
+   Parameter explanations:
+   - Base and Safety order amounts in USD: 20.00, 20.00
+   - Max 5 safety orders, 1.5% drop for SO, 1.0% take profit
+   - 300s (5 min) cooldown, 2% drop from last sell to restart early
 
 ### **5.3. Cron Job Setup**
 
-The following cron jobs need to be set up on your Linux server. Ensure the paths to the Python interpreter (within your virtual environment) and the scripts are correct.  
+The following cron jobs need to be set up on your Linux server. Ensure the paths to the Python interpreter (within your virtual environment) and the scripts are correct.
+
+```cron
+# Watchdog for the main WebSocket application (e.g., runs every 5 minutes)
+*/5 * * * * /path_to_project_venv/venv/bin/python /path_to_project/watchdog.py >> /path_to_project/logs/watchdog.log 2>&1
+
+# Caretaker: Order Manager (e.g., runs every 1 minute)
+* * * * * /path_to_project_venv/venv/bin/python /path_to_project/order_manager.py >> /path_to_project/logs/order_manager.log 2>&1
+
+# Caretaker: Cooldown Manager (e.g., runs every 1 minute)
+* * * * * /path_to_project_venv/venv/bin/python /path_to_project/cooldown_manager.py >> /path_to_project/logs/cooldown_manager.log 2>&1
+
+# Caretaker: Consistency Checker (e.g., runs every 5 minutes)
+*/5 * * * * /path_to_project_venv/venv/bin/python /path_to_project/consistency_checker.py >> /path_to_project/logs/consistency_checker.log 2>&1
 ```
-\# Ensure environment variables are available to cron, or source them in the scripts.  
-\# It's often best to create a wrapper script that activates the venv and then runs the Python script.
 
-\# Example: /path\_to\_project/run\_script\_wrapper.sh \<script\_name.py\>  
-\# \#\!/bin/bash  
-\# cd /path\_to\_project/  
-\# source venv/bin/activate  
-\# python $1 \>\> /path\_to\_project/logs/$1.log 2\>&1
+Setup notes:
+- Ensure environment variables are available to cron, or source them in the scripts.
+- It's often best to create a wrapper script that activates the venv and then runs the Python script.
 
-\# Watchdog for the main WebSocket application (e.g., runs every 5 minutes)  
-\*/5 \* \* \* \* /path\_to\_project\_venv/venv/bin/python /path\_to\_project/watchdog.py \>\> /path\_to\_project/logs/watchdog.log 2\>&1
-
-\# Caretaker: Order Manager (e.g., runs every 1 minute)  
-\* \* \* \* \* /path\_to\_project\_venv/venv/bin/python /path\_to\_project/order\_manager.py \>\> /path\_to\_project/logs/order\_manager.log 2\>&1
-
-\# Caretaker: Cooldown Manager (e.g., runs every 1 minute)  
-\* \* \* \* \* /path\_to\_project\_venv/venv/bin/python /path\_to\_project/cooldown\_manager.py \>\> /path\_to\_project/logs/cooldown\_manager.log 2\>&1
-
-\# Caretaker: Consistency Checker (e.g., runs every 5 minutes)  
-\*/5 \* \* \* \* /path\_to\_project\_venv/venv/bin/python /path\_to\_project/consistency\_checker.py \>\> /path\_to\_project/logs/consistency\_checker.log 2\>&1
+Example wrapper script: `/path_to_project/run_script_wrapper.sh <script_name.py>`
+```bash
+#!/bin/bash
+cd /path_to_project/
+source venv/bin/activate
+python $1 >> /path_to_project/logs/$1.log 2>&1
 ```
 
 *Create a logs directory in your project root for the log files.*
 
 ## **6\. Usage**
 
-1. Start the Main Application:  
-   The watchdog.py script is responsible for starting and monitoring the main WebSocket application (e.g., main\_app.py). Ensure watchdog.py is configured correctly to launch your main application script.  
-   Manually, you can run:  
-   ```
-   source venv/bin/activate  
-   python main\_app.py \# Or whatever your main WebSocket application script is named
-   ```
-2. Ensure Cron Jobs are Active:  
-   Verify that the cron jobs for the caretaker scripts and the watchdog are set up and running correctly.  
-3. **Monitoring:**  
-   * Check the log files in the logs/ directory for operational messages, errors, and trade activity.  
-   * Monitor your Alpaca account (Paper Trading dashboard) for orders and positions.  
-   * Check the database tables (dca\_assets, dca\_cycles) for state changes.
+1. Start the Main Application:
+   The watchdog.py script is responsible for starting and monitoring the main WebSocket application (e.g., main_app.py). Ensure watchdog.py is configured correctly to launch your main application script.
+   Manually, you can run:
+   
+```bash
+source venv/bin/activate
+python main_app.py
+```
+
+2. Ensure Cron Jobs are Active:
+   Verify that the cron jobs for the caretaker scripts and the watchdog are set up and running correctly.
+3. **Monitoring:**
+   * Check the log files in the logs/ directory for operational messages, errors, and trade activity.
+   * Monitor your Alpaca account (Paper Trading dashboard) for orders and positions.
+   * Check the database tables (dca_assets, dca_cycles) for state changes.
 
 ## **7\. Running Tests**
 
@@ -210,11 +247,13 @@ The following cron jobs need to be set up on your Linux server. Ensure the paths
 
 ### **7.2. Integration Tests**
 
-The integration test script (integration\_test.py) is designed to be run against your Alpaca Paper Trading account.  
-```
-source venv/bin/activate  
-python integration\_test.py
+The integration test script (integration_test.py) is designed to be run against your Alpaca Paper Trading account.
+
+```bash
+source venv/bin/activate
+python integration_test.py
 ```
 
-This script will perform setup (potentially clearing DB tables and Alpaca positions/orders for a clean test environment), run test scenarios, make assertions, and then perform teardown. It will provide verbose output.  
+This script will perform setup (potentially clearing DB tables and Alpaca positions/orders for a clean test environment), run test scenarios, make assertions, and then perform teardown. It will provide verbose output.
+
 *This README provides a foundational overview. Specific script names and detailed commands may evolve during development.*

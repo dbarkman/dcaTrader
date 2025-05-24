@@ -1,4 +1,4 @@
-# **DCA Crypto Trading Bot \- Post-v1.0 Features List**
+# **DCA Crypto Trading Bot - Post-v1.0 Features List**
 
 This document outlines features discussed and considered for development after the successful completion and stabilization of Version 1.0.
 
