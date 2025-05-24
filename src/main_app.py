@@ -16,13 +16,21 @@ import logging
 import os
 import sys
 from typing import Optional
+from decimal import Decimal
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
 # Add src directory to path for imports
 sys.path.insert(0, os.path.dirname(__file__))
 
 from alpaca.data.live import CryptoDataStream
 from alpaca.trading.stream import TradingStream
+
+# Import our database models and utilities
+from utils.db_utils import get_db_connection
+from models.asset_config import get_asset_config
+from models.cycle_data import get_latest_cycle, update_cycle
+from utils.alpaca_client_rest import get_trading_client, place_limit_buy_order, get_positions
 
 # Load environment variables
 load_dotenv()
@@ -43,6 +51,9 @@ shutdown_requested = False
 # Global stream references for shutdown
 crypto_stream_ref = None
 trading_stream_ref = None
+
+# Global tracking for recent orders to prevent duplicates
+recent_orders = {}  # symbol -> {'order_id': str, 'timestamp': datetime}
 
 
 def validate_environment() -> bool:
@@ -66,11 +77,177 @@ async def on_crypto_quote(quote):
     """
     Handler for cryptocurrency quote updates.
     
+    Phase 4: Monitor prices and place base orders when conditions are met.
+    
     Args:
         quote: Quote object from Alpaca containing bid/ask data
     """
     logger.info(f"Quote: {quote.symbol} - Bid: ${quote.bid_price} @ {quote.bid_size}, "
                f"Ask: ${quote.ask_price} @ {quote.ask_size}")
+    
+    # Phase 4: Check if we should place a base order for this asset
+    try:
+        await asyncio.to_thread(check_and_place_base_order, quote)
+    except Exception as e:
+        logger.error(f"Error in base order check for {quote.symbol}: {e}")
+
+
+def check_and_place_base_order(quote):
+    """
+    Check if conditions are met to place a base order and place it if so.
+    
+    This function runs in a separate thread to avoid blocking the WebSocket.
+    
+    Args:
+        quote: Quote object from Alpaca containing bid/ask data
+    """
+    global recent_orders
+    symbol = quote.symbol
+    ask_price = quote.ask_price
+    bid_price = quote.bid_price
+    
+    try:
+        # Step 1: Check for recent orders to prevent duplicates
+        now = datetime.now()
+        recent_order_cooldown = 30  # seconds
+        
+        if symbol in recent_orders:
+            time_since_order = now - recent_orders[symbol]['timestamp']
+            if time_since_order.total_seconds() < recent_order_cooldown:
+                logger.debug(f"Skipping {symbol} - recent order placed {time_since_order.total_seconds():.1f}s ago")
+                return
+        
+        # Step 2: Get asset configuration
+        asset_config = get_asset_config(symbol)
+        if not asset_config:
+            # Asset not configured - skip silently
+            return
+        
+        if not asset_config.is_enabled:
+            logger.debug(f"Asset {symbol} is disabled, skipping base order check")
+            return
+        
+        logger.debug(f"Checking base order conditions for {symbol}")
+        
+        # Step 3: Get latest cycle for this asset
+        latest_cycle = get_latest_cycle(asset_config.id)
+        if not latest_cycle:
+            logger.debug(f"No cycle found for asset {symbol}, skipping base order check")
+            return
+        
+        # Step 4: Check if cycle is in 'watching' status with zero quantity
+        if latest_cycle.status != 'watching':
+            logger.debug(f"Asset {symbol} cycle status is '{latest_cycle.status}', not 'watching' - skipping")
+            return
+        
+        if latest_cycle.quantity != Decimal('0'):
+            logger.debug(f"Asset {symbol} cycle has quantity {latest_cycle.quantity}, not 0 - skipping")
+            return
+        
+        logger.info(f"Base order conditions met for {symbol} - checking Alpaca positions...")
+        
+        # Step 5: Initialize Alpaca client and check for existing positions
+        client = get_trading_client()
+        if not client:
+            logger.error(f"Could not initialize Alpaca client for {symbol}")
+            return
+        
+        # Step 6: Check for existing positions
+        positions = get_positions(client)
+        existing_position = None
+        
+        for position in positions:
+            if position.symbol == symbol and float(position.qty) != 0:
+                existing_position = position
+                break
+        
+        if existing_position:
+            logger.warning(f"Base order for {symbol} skipped, existing position found on Alpaca. "
+                          f"Position: {existing_position.qty} @ ${existing_position.avg_cost}")
+            # TODO: Send notification in future phases
+            return
+        
+        # Step 7: No existing position - we can place a base order
+        logger.info(f"No existing position for {symbol} - proceeding with base order placement")
+        
+        # Step 8: Calculate order size (convert USD to crypto quantity)
+        if not ask_price or ask_price <= 0:
+            logger.error(f"Invalid ask price for {symbol}: {ask_price}")
+            return
+        
+        if not bid_price or bid_price <= 0:
+            logger.error(f"Invalid bid price for {symbol}: {bid_price}")
+            return
+        
+        base_order_usd = float(asset_config.base_order_amount)
+        if not base_order_usd or base_order_usd <= 0:
+            logger.error(f"Invalid base order amount for {symbol}: {base_order_usd}")
+            return
+            
+        order_quantity = base_order_usd / ask_price
+        
+        # Validate calculated values before placing order
+        if not order_quantity or order_quantity <= 0:
+            logger.error(f"Invalid calculated order quantity for {symbol}: {order_quantity}")
+            return
+        
+        # Enhanced price logging
+        spread = ask_price - bid_price
+        spread_pct = (spread / bid_price) * 100 if bid_price > 0 else 0
+        
+        logger.info(f"📊 Market Data for {symbol}:")
+        logger.info(f"   Bid: ${bid_price:,.4f} | Ask: ${ask_price:,.4f} | Spread: ${spread:.4f} ({spread_pct:.3f}%)")
+        logger.info(f"   Order Amount: ${base_order_usd} ÷ ${ask_price:,.4f} = {order_quantity:.8f} {symbol.split('/')[0]}")
+        
+        # Step 9: Place the base limit buy order with detailed logging
+        
+        # For integration testing, use aggressive pricing to ensure fast fills
+        testing_mode = os.getenv('TESTING_MODE', 'false').lower() == 'true'
+        if testing_mode:
+            # Use 5% above ask for aggressive fills during testing
+            aggressive_price = ask_price * 1.05
+            logger.info(f"🚀 TESTING MODE: Using aggressive pricing (5% above ask)")
+            logger.info(f"   Ask Price: ${ask_price:,.4f}")
+            logger.info(f"   Aggressive Price: ${aggressive_price:,.4f} (+5%)")
+            limit_price = aggressive_price
+        else:
+            # Normal production mode: use ask price
+            limit_price = ask_price
+        
+        logger.info(f"🔄 Placing LIMIT BUY order for {symbol}:")
+        logger.info(f"   Type: LIMIT | Side: BUY")
+        logger.info(f"   Limit Price: ${limit_price:,.4f} {'(AGGRESSIVE +5%)' if testing_mode else '(current ask)'}")
+        logger.info(f"   Quantity: {order_quantity:.8f}")
+        logger.info(f"   Total Value: ${base_order_usd}")
+        
+        order = place_limit_buy_order(
+            client=client,
+            symbol=symbol,
+            qty=order_quantity,
+            limit_price=limit_price,
+            time_in_force='gtc'  # Use 'gtc' orders for crypto (day is not valid for crypto)
+        )
+        
+        if order:
+            # Track this order to prevent duplicates
+            recent_orders[symbol] = {
+                'order_id': order.id,
+                'timestamp': now
+            }
+            
+            logger.info(f"✅ LIMIT BUY order PLACED for {symbol}:")
+            logger.info(f"   Order ID: {order.id}")
+            logger.info(f"   Quantity: {order_quantity:.8f}")
+            logger.info(f"   Limit Price: ${limit_price:,.4f}")
+            logger.info(f"   Time in Force: GTC")
+            # NOTE: We do NOT update the cycle here - that's TradingStream's job when it fills
+        else:
+            logger.error(f"❌ Failed to place base order for {symbol}")
+            
+    except Exception as e:
+        logger.error(f"Error in check_and_place_base_order for {symbol}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
 
 async def on_crypto_trade(trade):
@@ -102,12 +279,183 @@ async def on_trade_update(trade_update):
     Args:
         trade_update: TradeUpdate object from Alpaca
     """
-    logger.info(f"Trade Update: {trade_update.event} - Order ID: {trade_update.order.id}, "
-               f"Symbol: {trade_update.order.symbol}, Side: {trade_update.order.side}, "
-               f"Status: {trade_update.order.status}")
+    order = trade_update.order
+    event = trade_update.event
     
+    logger.info(f"📨 Trade Update: {event.upper()} - {order.symbol}")
+    logger.info(f"   Order ID: {order.id}")
+    logger.info(f"   Side: {order.side.upper()} | Type: {order.order_type.upper() if hasattr(order, 'order_type') else 'UNKNOWN'}")
+    logger.info(f"   Status: {order.status.upper()}")
+    
+    if hasattr(order, 'qty') and order.qty:
+        logger.info(f"   Quantity: {order.qty}")
+    
+    if hasattr(order, 'limit_price') and order.limit_price:
+        # Safely handle limit_price - it might be a string
+        try:
+            limit_price_float = float(order.limit_price)
+            logger.info(f"   Limit Price: ${limit_price_float:,.4f}")
+        except (ValueError, TypeError):
+            logger.info(f"   Limit Price: {order.limit_price}")
+    
+    # Enhanced execution details for fills
     if hasattr(trade_update, 'execution_id') and trade_update.execution_id:
-        logger.info(f"  Execution: Price ${trade_update.price}, Qty: {trade_update.qty}")
+        price = getattr(trade_update, 'price', None) 
+        qty = getattr(trade_update, 'qty', None)
+        
+        if price is not None and qty is not None:
+            try:
+                price_float = float(price)
+                qty_float = float(qty)
+                total_value = price_float * qty_float
+                
+                logger.info(f"💰 EXECUTION DETAILS:")
+                logger.info(f"   Execution ID: {trade_update.execution_id}")
+                logger.info(f"   Fill Price: ${price_float:,.4f}")
+                logger.info(f"   Fill Quantity: {qty_float}")
+                logger.info(f"   Fill Value: ${total_value:,.2f}")
+                
+                # Show performance vs limit price if available
+                if hasattr(order, 'limit_price') and order.limit_price:
+                    try:
+                        limit_price_float = float(order.limit_price)
+                        price_diff = price_float - limit_price_float
+                        if order.side.lower() == 'buy':
+                            performance = "BETTER" if price_diff < 0 else "WORSE" if price_diff > 0 else "EXACT"
+                            logger.info(f"   vs Limit: {performance} (${price_diff:+.4f})")
+                    except (ValueError, TypeError):
+                        logger.info(f"   vs Limit: Unable to compare (limit price: {order.limit_price})")
+            except (ValueError, TypeError):
+                logger.info(f"💰 EXECUTION DETAILS:")
+                logger.info(f"   Execution ID: {trade_update.execution_id}")
+                logger.info(f"   Fill Price: {price}")
+                logger.info(f"   Fill Quantity: {qty}")
+                logger.info(f"   Fill Value: Unable to calculate")
+        else:
+            logger.info(f"   Execution ID: {trade_update.execution_id} (price/qty data pending)")
+    
+    # Additional details for specific events
+    if event == 'fill':
+        logger.info(f"🎯 ORDER FILLED SUCCESSFULLY for {order.symbol}!")
+        
+        # Phase 7: Update dca_cycles table on BUY order fills
+        if order.side.lower() == 'buy':
+            await update_cycle_on_buy_fill(order, trade_update)
+
+
+async def update_cycle_on_buy_fill(order, trade_update):
+    """
+    Update dca_cycles table when a BUY order fills.
+    
+    This is Phase 7 functionality - updating the database state 
+    when base orders or safety orders fill.
+    
+    Args:
+        order: The filled order object
+        trade_update: The trade update containing execution details
+    """
+    try:
+        symbol = order.symbol
+        order_id = order.id
+        
+        logger.info(f"🔄 Updating cycle database for {symbol} BUY fill...")
+        
+        # Step 1: Get the asset configuration
+        asset_config = get_asset_config(symbol)
+        if not asset_config:
+            logger.error(f"❌ Cannot update cycle: No asset config found for {symbol}")
+            return
+        
+        # Step 2: Get the latest cycle for this asset
+        latest_cycle = get_latest_cycle(asset_config.id)
+        if not latest_cycle:
+            logger.error(f"❌ Cannot update cycle: No cycle found for {symbol}")
+            return
+        
+        # Step 3: Extract fill details safely
+        fill_price = None
+        fill_qty = None
+        
+        # Try to get execution details from trade_update first
+        if hasattr(trade_update, 'price') and trade_update.price:
+            try:
+                fill_price = float(trade_update.price)
+            except (ValueError, TypeError):
+                logger.warning(f"Could not parse fill price from trade_update: {trade_update.price}")
+        
+        if hasattr(trade_update, 'qty') and trade_update.qty:
+            try:
+                fill_qty = float(trade_update.qty)
+            except (ValueError, TypeError):
+                logger.warning(f"Could not parse fill quantity from trade_update: {trade_update.qty}")
+        
+        # Fallback to order details if trade_update doesn't have execution info
+        if fill_qty is None and hasattr(order, 'qty') and order.qty:
+            try:
+                fill_qty = float(order.qty)
+            except (ValueError, TypeError):
+                logger.warning(f"Could not parse quantity from order: {order.qty}")
+        
+        if fill_price is None and hasattr(order, 'limit_price') and order.limit_price:
+            try:
+                fill_price = float(order.limit_price)
+                logger.info(f"Using limit price as fill price: ${fill_price}")
+            except (ValueError, TypeError):
+                logger.warning(f"Could not parse limit price from order: {order.limit_price}")
+        
+        if fill_price is None or fill_qty is None:
+            logger.error(f"❌ Cannot update cycle: Missing fill data (price={fill_price}, qty={fill_qty})")
+            return
+        
+        # Step 4: Calculate new cycle values
+        current_qty = latest_cycle.quantity
+        current_avg_price = latest_cycle.average_purchase_price
+        
+        new_fill_qty = Decimal(str(fill_qty))
+        new_fill_price = Decimal(str(fill_price))
+        
+        # Calculate new total quantity
+        new_total_qty = current_qty + new_fill_qty
+        
+        # Calculate new weighted average purchase price
+        if current_qty == 0:
+            # First purchase - use fill price as average
+            new_avg_price = new_fill_price
+        else:
+            # Weighted average: (old_qty * old_price + new_qty * new_price) / total_qty
+            total_cost = (current_qty * current_avg_price) + (new_fill_qty * new_fill_price)
+            new_avg_price = total_cost / new_total_qty
+        
+        # Determine if this was a safety order (current_qty > 0 means we already had position)
+        is_safety_order = current_qty > 0
+        new_safety_orders = latest_cycle.safety_orders + (1 if is_safety_order else 0)
+        
+        # Step 5: Update the cycle in database
+        cycle_updates = {
+            'quantity': new_total_qty,
+            'average_purchase_price': new_avg_price,
+            'last_order_fill_price': new_fill_price,
+            'safety_orders': new_safety_orders,
+            'status': 'watching',  # Set to watching to look for take-profit opportunities
+            'latest_order_id': None  # Clear latest_order_id since order is now filled
+        }
+        
+        update_success = update_cycle(latest_cycle.id, cycle_updates)
+        
+        if update_success:
+            logger.info(f"✅ Cycle database updated successfully for {symbol}:")
+            logger.info(f"   🔄 Total Quantity: {new_total_qty}")
+            logger.info(f"   💰 Avg Purchase Price: ${new_avg_price:.4f}")
+            logger.info(f"   📊 Last Fill Price: ${new_fill_price:.4f}")
+            logger.info(f"   🛡️ Safety Orders: {new_safety_orders}")
+            logger.info(f"   📈 Order Type: {'Safety Order' if is_safety_order else 'Base Order'}")
+            logger.info(f"   ⚡ Status: watching (ready for take-profit)")
+        else:
+            logger.error(f"❌ Failed to update cycle database for {symbol}")
+            
+    except Exception as e:
+        logger.error(f"❌ Error updating cycle on BUY fill for {order.symbol}: {e}")
+        logger.exception("Full traceback:")
 
 
 def setup_signal_handlers():

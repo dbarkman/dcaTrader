@@ -77,7 +77,8 @@ def test_validate_environment_missing_both(mock_getenv):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_on_crypto_quote_handler(caplog):
+@patch('main_app.check_and_place_base_order')
+async def test_on_crypto_quote_handler(mock_check_base_order, caplog):
     """Test cryptocurrency quote handler with mock quote data."""
     # Create a mock quote object
     mock_quote = MagicMock()
@@ -93,12 +94,16 @@ async def test_on_crypto_quote_handler(caplog):
     # Call the handler
     await on_crypto_quote(mock_quote)
     
-    # Verify the log message was created
-    assert len(caplog.records) == 1
-    log_message = caplog.records[0].message
+    # Verify the log message was created (only the quote log message)
+    quote_logs = [record for record in caplog.records if 'Quote: BTC/USD' in record.message]
+    assert len(quote_logs) == 1
+    log_message = quote_logs[0].message
     assert 'Quote: BTC/USD' in log_message
     assert 'Bid: $50000.5 @ 1.5' in log_message
     assert 'Ask: $50001.0 @ 2.0' in log_message
+    
+    # Verify that base order check was called
+    mock_check_base_order.assert_called_once_with(mock_quote)
 
 
 @pytest.mark.unit
@@ -170,6 +175,8 @@ async def test_on_trade_update_handler_basic(caplog):
     mock_order.symbol = 'BTC/USD'
     mock_order.side = 'buy'
     mock_order.status = 'filled'
+    mock_order.qty = '0.001'
+    mock_order.limit_price = '1.0'  # String to test our parsing
     
     mock_trade_update.order = mock_order
     mock_trade_update.execution_id = None  # No execution details
@@ -180,14 +187,26 @@ async def test_on_trade_update_handler_basic(caplog):
     # Call the handler
     await on_trade_update(mock_trade_update)
     
-    # Verify the basic log message was created
-    assert len(caplog.records) == 1
-    log_message = caplog.records[0].message
-    assert 'Trade Update: fill' in log_message
-    assert 'Order ID: test_order_123' in log_message
-    assert 'Symbol: BTC/USD' in log_message
-    assert 'Side: buy' in log_message
-    assert 'Status: filled' in log_message
+    # Verify the enhanced log messages were created (should be 9 total now with Phase 7)
+    # 1. Trade Update header
+    # 2. Order ID
+    # 3. Side | Type
+    # 4. Status
+    # 5. Quantity
+    # 6. Limit Price
+    # 7. ORDER FILLED SUCCESSFULLY message
+    # 8. Updating cycle database message (Phase 7)
+    # 9. Cannot update cycle error (no asset config in unit test)
+    assert len(caplog.records) == 9
+    
+    # Check key log messages
+    log_messages = [record.message for record in caplog.records]
+    assert any('📨 Trade Update: FILL - BTC/USD' in msg for msg in log_messages)
+    assert any('Order ID: test_order_123' in msg for msg in log_messages)
+    assert any('Status: FILLED' in msg for msg in log_messages)
+    assert any('🎯 ORDER FILLED SUCCESSFULLY for BTC/USD!' in msg for msg in log_messages)
+    assert any('🔄 Updating cycle database for BTC/USD BUY fill...' in msg for msg in log_messages)
+    assert any('❌ Cannot update cycle: No asset config found for BTC/USD' in msg for msg in log_messages)
 
 
 @pytest.mark.unit
@@ -198,8 +217,8 @@ async def test_on_trade_update_handler_with_execution(caplog):
     mock_trade_update = MagicMock()
     mock_trade_update.event = 'partial_fill'
     mock_trade_update.execution_id = 'exec_456'
-    mock_trade_update.price = 50000.25
-    mock_trade_update.qty = 0.1
+    mock_trade_update.price = '50000.25'  # String to test our parsing
+    mock_trade_update.qty = '0.1'         # String to test our parsing
     
     # Create a mock order object
     mock_order = MagicMock()
@@ -207,6 +226,8 @@ async def test_on_trade_update_handler_with_execution(caplog):
     mock_order.symbol = 'ETH/USD'
     mock_order.side = 'sell'
     mock_order.status = 'partially_filled'
+    mock_order.qty = '1.0'
+    mock_order.limit_price = '1.0'  # String to test our parsing
     
     mock_trade_update.order = mock_order
     
@@ -216,15 +237,24 @@ async def test_on_trade_update_handler_with_execution(caplog):
     # Call the handler
     await on_trade_update(mock_trade_update)
     
-    # Verify both log messages were created
-    assert len(caplog.records) == 2
+    # Verify the enhanced log messages were created (should be 11 total)
+    # 1. Trade Update header
+    # 2. Order ID
+    # 3. Side | Type
+    # 4. Status
+    # 5. Quantity
+    # 6. Limit Price
+    # 7. EXECUTION DETAILS header
+    # 8. Execution ID
+    # 9. Fill Price
+    # 10. Fill Quantity
+    # 11. Fill Value
+    assert len(caplog.records) == 11
     
-    # Check the basic trade update message
-    basic_message = caplog.records[0].message
-    assert 'Trade Update: partial_fill' in basic_message
-    assert 'Order ID: test_order_456' in basic_message
-    
-    # Check the execution details message
-    execution_message = caplog.records[1].message
-    assert 'Execution: Price $50000.25' in execution_message
-    assert 'Qty: 0.1' in execution_message 
+    # Check key log messages
+    log_messages = [record.message for record in caplog.records]
+    assert any('📨 Trade Update: PARTIAL_FILL - ETH/USD' in msg for msg in log_messages)
+    assert any('Order ID: test_order_456' in msg for msg in log_messages)
+    assert any('💰 EXECUTION DETAILS:' in msg for msg in log_messages)
+    assert any('Fill Price: $50,000.2500' in msg for msg in log_messages)
+    assert any('Fill Quantity: 0.1' in msg for msg in log_messages) 

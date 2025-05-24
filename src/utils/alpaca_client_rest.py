@@ -20,6 +20,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoLatestTradeRequest
 from alpaca.trading.models import TradeAccount, Order
+from alpaca.trading.models import Position
 
 # Load environment variables
 load_dotenv()
@@ -133,6 +134,23 @@ def place_limit_buy_order(
         Order object if successful, None if error
     """
     try:
+        # Validate inputs before placing order
+        if qty is None or limit_price is None:
+            logger.error(f"Invalid order parameters for {symbol}: qty={qty}, limit_price={limit_price}")
+            return None
+            
+        if qty <= 0:
+            logger.error(f"Invalid quantity for {symbol}: {qty} (must be > 0)")
+            return None
+            
+        if limit_price <= 0:
+            logger.error(f"Invalid limit price for {symbol}: ${limit_price} (must be > 0)")
+            return None
+            
+        if not symbol or not isinstance(symbol, str):
+            logger.error(f"Invalid symbol: {symbol}")
+            return None
+        
         # Convert time_in_force string to enum
         tif_mapping = {
             'day': TimeInForce.DAY,
@@ -142,6 +160,9 @@ def place_limit_buy_order(
         }
         
         tif_enum = tif_mapping.get(time_in_force.lower(), TimeInForce.DAY)
+        
+        # Log order details before submission
+        logger.info(f"Placing limit BUY order: {qty} {symbol} @ ${limit_price} ({time_in_force})")
         
         order_request = LimitOrderRequest(
             symbol=symbol,
@@ -196,4 +217,23 @@ def cancel_order(client: TradingClient, order_id: str) -> bool:
         return True
     except Exception as e:
         logger.error(f"Error canceling order {order_id}: {e}")
-        return False 
+        return False
+
+
+def get_positions(client: TradingClient) -> list[Position]:
+    """
+    Fetch all current positions from Alpaca
+    
+    Args:
+        client: Initialized TradingClient
+        
+    Returns:
+        List of Position objects (empty list if error or no positions)
+    """
+    try:
+        positions = client.get_all_positions()
+        logger.info(f"Retrieved {len(positions)} positions")
+        return positions
+    except Exception as e:
+        logger.error(f"Error fetching positions: {e}")
+        return [] 

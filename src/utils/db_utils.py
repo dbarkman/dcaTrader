@@ -38,16 +38,16 @@ def get_db_connection() -> mysql.connector.MySQLConnection:
         # Parse port number, handling potential comments or extra text
         try:
             # Extract just the numeric part, handling quotes and comments
-            port_clean = port_str.strip('"\'').split()[0]  # Remove quotes and take first word
+            port_clean = port_str.strip('"\'').split('#')[0].strip()  # Remove quotes and comments
             port = int(port_clean)
         except (ValueError, IndexError):
-            logger.warning(f"Invalid DB_PORT value '{port_str}', using default 3306")
+            logger.debug(f"Invalid DB_PORT value '{port_str}', using default 3306")
             port = 3306
         
         if not all([host, user, password, database]):
             raise ValueError("Missing required database environment variables")
         
-        logger.info(f"Connecting to database {database} at {host}:{port}")
+        logger.debug(f"Connecting to database {database} at {host}:{port}")
         
         connection = mysql.connector.connect(
             host=host,
@@ -58,7 +58,7 @@ def get_db_connection() -> mysql.connector.MySQLConnection:
             autocommit=False
         )
         
-        logger.info("Database connection established successfully")
+        logger.debug("Database connection established successfully")
         return connection
         
     except mysql.connector.Error as e:
