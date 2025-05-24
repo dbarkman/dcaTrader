@@ -78,6 +78,7 @@ async def on_crypto_quote(quote):
     Handler for cryptocurrency quote updates.
     
     Phase 4: Monitor prices and place base orders when conditions are met.
+    Phase 5: Monitor prices and place safety orders when conditions are met.
     
     Args:
         quote: Quote object from Alpaca containing bid/ask data
@@ -90,6 +91,12 @@ async def on_crypto_quote(quote):
         await asyncio.to_thread(check_and_place_base_order, quote)
     except Exception as e:
         logger.error(f"Error in base order check for {quote.symbol}: {e}")
+    
+    # Phase 5: Check if we should place a safety order for this asset
+    try:
+        await asyncio.to_thread(check_and_place_safety_order, quote)
+    except Exception as e:
+        logger.error(f"Error in safety order check for {quote.symbol}: {e}")
 
 
 def check_and_place_base_order(quote):
@@ -246,6 +253,183 @@ def check_and_place_base_order(quote):
             
     except Exception as e:
         logger.error(f"Error in check_and_place_base_order for {symbol}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+
+def check_and_place_safety_order(quote):
+    """
+    Check if conditions are met to place a safety order and place it if so.
+    
+    This function runs in a separate thread to avoid blocking the WebSocket.
+    Safety orders are placed when:
+    - Cycle status is 'watching' AND quantity > 0 (position exists)
+    - Safety orders count < max_safety_orders
+    - Current ask price <= trigger price (last_order_fill_price * (1 - safety_order_deviation/100))
+    
+    Args:
+        quote: Quote object from Alpaca containing bid/ask data
+    """
+    global recent_orders
+    symbol = quote.symbol
+    ask_price = quote.ask_price
+    bid_price = quote.bid_price
+    
+    try:
+        # Step 1: Check for recent orders to prevent duplicates
+        now = datetime.now()
+        recent_order_cooldown = 30  # seconds
+        
+        if symbol in recent_orders:
+            time_since_order = now - recent_orders[symbol]['timestamp']
+            if time_since_order.total_seconds() < recent_order_cooldown:
+                logger.debug(f"Skipping safety order for {symbol} - recent order placed {time_since_order.total_seconds():.1f}s ago")
+                return
+        
+        # Step 2: Get asset configuration
+        asset_config = get_asset_config(symbol)
+        if not asset_config:
+            # Asset not configured - skip silently
+            return
+        
+        if not asset_config.is_enabled:
+            logger.debug(f"Asset {symbol} is disabled, skipping safety order check")
+            return
+        
+        # Step 3: Get latest cycle for this asset
+        latest_cycle = get_latest_cycle(asset_config.id)
+        if not latest_cycle:
+            logger.debug(f"No cycle found for asset {symbol}, skipping safety order check")
+            return
+        
+        # Step 4: Check if cycle is in 'watching' status with quantity > 0 (existing position)
+        if latest_cycle.status != 'watching':
+            logger.debug(f"Asset {symbol} cycle status is '{latest_cycle.status}', not 'watching' - skipping safety order")
+            return
+        
+        if latest_cycle.quantity <= Decimal('0'):
+            logger.debug(f"Asset {symbol} cycle has quantity {latest_cycle.quantity}, not > 0 - skipping safety order")
+            return
+        
+        # Step 5: Check if we can place more safety orders
+        if latest_cycle.safety_orders >= asset_config.max_safety_orders:
+            logger.debug(f"Asset {symbol} already at max safety orders ({latest_cycle.safety_orders}/{asset_config.max_safety_orders}) - skipping")
+            return
+        
+        # Step 6: Check if we have a last_order_fill_price to calculate trigger from
+        if latest_cycle.last_order_fill_price is None:
+            logger.debug(f"Asset {symbol} has no last_order_fill_price - cannot calculate safety order trigger")
+            return
+        
+        # Step 7: Calculate trigger price for safety order
+        safety_deviation_decimal = asset_config.safety_order_deviation / Decimal('100')  # Convert % to decimal
+        trigger_price = latest_cycle.last_order_fill_price * (Decimal('1') - safety_deviation_decimal)
+        
+        # Convert ask_price to Decimal for consistent calculations
+        ask_price_decimal = Decimal(str(ask_price))
+        
+        logger.debug(f"Safety order conditions for {symbol}:")
+        logger.debug(f"   Status: {latest_cycle.status} | Quantity: {latest_cycle.quantity}")
+        logger.debug(f"   Safety Orders: {latest_cycle.safety_orders}/{asset_config.max_safety_orders}")
+        logger.debug(f"   Last Fill Price: ${latest_cycle.last_order_fill_price}")
+        logger.debug(f"   Safety Deviation: {asset_config.safety_order_deviation}%")
+        logger.debug(f"   Trigger Price: ${trigger_price:.4f}")
+        logger.debug(f"   Current Ask: ${ask_price}")
+        
+        # Step 8: Check if current ask price has dropped enough to trigger safety order
+        if ask_price_decimal > trigger_price:
+            logger.debug(f"Ask price ${ask_price} > trigger ${trigger_price:.4f} - no safety order needed")
+            return
+        
+        logger.info(f"🛡️ Safety order conditions met for {symbol}!")
+        
+        # Step 9: Validate market data
+        if not ask_price or ask_price <= 0:
+            logger.error(f"Invalid ask price for safety order {symbol}: {ask_price}")
+            return
+        
+        if not bid_price or bid_price <= 0:
+            logger.error(f"Invalid bid price for safety order {symbol}: {bid_price}")
+            return
+        
+        # Step 10: Initialize Alpaca client 
+        client = get_trading_client()
+        if not client:
+            logger.error(f"Could not initialize Alpaca client for safety order {symbol}")
+            return
+        
+        # Step 11: Calculate safety order size (convert USD to crypto quantity)
+        safety_order_usd = float(asset_config.safety_order_amount)
+        if not safety_order_usd or safety_order_usd <= 0:
+            logger.error(f"Invalid safety order amount for {symbol}: {safety_order_usd}")
+            return
+            
+        order_quantity = safety_order_usd / ask_price
+        
+        # Validate calculated values before placing order
+        if not order_quantity or order_quantity <= 0:
+            logger.error(f"Invalid calculated safety order quantity for {symbol}: {order_quantity}")
+            return
+        
+        # Enhanced logging for safety order
+        price_drop = latest_cycle.last_order_fill_price - ask_price_decimal
+        price_drop_pct = (price_drop / latest_cycle.last_order_fill_price) * Decimal('100')
+        
+        logger.info(f"📊 Safety Order Analysis for {symbol}:")
+        logger.info(f"   Last Fill: ${latest_cycle.last_order_fill_price:.4f} | Current Ask: ${ask_price:,.4f}")
+        logger.info(f"   Price Drop: ${price_drop:.4f} ({price_drop_pct:.2f}%)")
+        logger.info(f"   Trigger at: ${trigger_price:.4f} ({asset_config.safety_order_deviation}% drop)")
+        logger.info(f"   Safety Orders: {latest_cycle.safety_orders + 1}/{asset_config.max_safety_orders}")
+        logger.info(f"   Order Amount: ${safety_order_usd} ÷ ${ask_price:,.4f} = {order_quantity:.8f} {symbol.split('/')[0]}")
+        
+        # Step 12: Place the safety limit buy order with detailed logging
+        
+        # For integration testing, use aggressive pricing to ensure fast fills
+        testing_mode = os.getenv('TESTING_MODE', 'false').lower() == 'true'
+        if testing_mode:
+            # Use 5% above ask for aggressive fills during testing
+            aggressive_price = ask_price * 1.05
+            logger.info(f"🚀 TESTING MODE: Using aggressive pricing (5% above ask)")
+            logger.info(f"   Ask Price: ${ask_price:,.4f}")
+            logger.info(f"   Aggressive Price: ${aggressive_price:,.4f} (+5%)")
+            limit_price = aggressive_price
+        else:
+            # Normal production mode: use ask price
+            limit_price = ask_price
+        
+        logger.info(f"🔄 Placing SAFETY LIMIT BUY order for {symbol}:")
+        logger.info(f"   Type: LIMIT | Side: BUY | Order Type: SAFETY #{latest_cycle.safety_orders + 1}")
+        logger.info(f"   Limit Price: ${limit_price:,.4f} {'(AGGRESSIVE +5%)' if testing_mode else '(current ask)'}")
+        logger.info(f"   Quantity: {order_quantity:.8f}")
+        logger.info(f"   Total Value: ${safety_order_usd}")
+        
+        order = place_limit_buy_order(
+            client=client,
+            symbol=symbol,
+            qty=order_quantity,
+            limit_price=limit_price,
+            time_in_force='gtc'  # Use 'gtc' orders for crypto
+        )
+        
+        if order:
+            # Track this order to prevent duplicates
+            recent_orders[symbol] = {
+                'order_id': order.id,
+                'timestamp': now
+            }
+            
+            logger.info(f"✅ SAFETY LIMIT BUY order PLACED for {symbol}:")
+            logger.info(f"   Order ID: {order.id}")
+            logger.info(f"   Quantity: {order_quantity:.8f}")
+            logger.info(f"   Limit Price: ${limit_price:,.4f}")
+            logger.info(f"   Time in Force: GTC")
+            logger.info(f"   🛡️ Safety Order #{latest_cycle.safety_orders + 1} triggered by {price_drop_pct:.2f}% price drop")
+            # NOTE: We do NOT update the cycle here - that's TradingStream's job when it fills
+        else:
+            logger.error(f"❌ Failed to place safety order for {symbol}")
+            
+    except Exception as e:
+        logger.error(f"Error in check_and_place_safety_order for {symbol}: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
 

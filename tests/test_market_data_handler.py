@@ -1,7 +1,7 @@
 """
-Unit tests for market data handler functionality (Phase 4)
+Unit tests for market data handler functionality (Phase 4 & 5)
 
-Tests the logic for monitoring crypto prices and placing base orders
+Tests the logic for monitoring crypto prices and placing base orders and safety orders
 when conditions are met.
 """
 
@@ -14,7 +14,7 @@ import os
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from main_app import check_and_place_base_order
+from main_app import check_and_place_base_order, check_and_place_safety_order
 
 
 class TestBaseOrderLogic:
