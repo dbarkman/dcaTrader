@@ -1,23 +1,35 @@
 #!/usr/bin/env python3
 """
-Integration test script for the DCA trading bot.
-This script tests end-to-end scenarios against a real database.
+Integration Test Script for DCA Trading Bot
 
-Phase 1: Basic CRUD operations for dca_assets and dca_cycles.
+This script tests end-to-end scenarios against the actual database and Alpaca paper trading account.
+It includes setup, execution, assertions, and teardown for each phase of development.
+
+Run this script to verify that Phase 1 functionality is working correctly.
 """
 
-import os
 import sys
-import logging
-from datetime import datetime
+import os
 from decimal import Decimal
+from datetime import datetime
+import logging
+import time
 
-# Add src to path for imports
+# Add src directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from utils.db_utils import execute_query, check_connection
-from models.asset_config import get_asset_config, update_asset_config
-from models.cycle_data import create_cycle, get_latest_cycle, update_cycle
+# Import our utility functions and models
+from utils.db_utils import get_db_connection, execute_query, check_connection
+from models.asset_config import DcaAsset, get_asset_config, get_all_enabled_assets, update_asset_config
+from models.cycle_data import DcaCycle, get_latest_cycle, create_cycle, update_cycle
+from utils.alpaca_client_rest import (
+    get_trading_client, 
+    get_account_info, 
+    get_latest_crypto_price,
+    place_limit_buy_order,
+    get_open_orders,
+    cancel_order
+)
 
 # Configure logging
 logging.basicConfig(
@@ -229,6 +241,171 @@ def test_phase1_asset_and_cycle_crud():
             logger.error(f"Cleanup failed: {e}")
 
 
+def test_phase2_alpaca_rest_api_order_cycle():
+    """
+    Integration Test for Phase 2: Alpaca REST API Order Cycle
+    
+    Scenario: Test the full cycle of placing, viewing, and canceling an order via REST API 
+    on the Alpaca paper account.
+    
+    Actions:
+    1. Initialize TradingClient and get account info
+    2. Get latest crypto price for BTC/USD
+    3. Place a limit BUY order with very small quantity at low price
+    4. Verify order appears in open orders
+    5. Cancel the order
+    6. Verify order is no longer in open orders or shows as canceled
+    """
+    print("\n" + "="*60)
+    print("PHASE 2 INTEGRATION TEST: Alpaca REST API Order Cycle")
+    print("="*60)
+    
+    try:
+        # Setup: Initialize TradingClient
+        print("\n1. Initializing Alpaca TradingClient...")
+        
+        # Check if .env file has required Alpaca credentials
+        required_env_vars = ['APCA_API_KEY_ID', 'APCA_API_SECRET_KEY']
+        missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            print(f"❌ FAILED: Missing required environment variables: {missing_vars}")
+            print("Please ensure your .env file contains Alpaca API credentials.")
+            return False
+        
+        client = get_trading_client()
+        if not client:
+            print("❌ FAILED: Could not initialize TradingClient")
+            return False
+        
+        print("✅ SUCCESS: TradingClient initialized")
+        
+        # Action 1: Call get_account_info() and print some details
+        print("\n2. Fetching account information...")
+        account = get_account_info(client)
+        
+        if not account:
+            print("❌ FAILED: get_account_info() returned None")
+            return False
+        
+        print(f"✅ SUCCESS: Account retrieved")
+        print(f"   Account Number: {account.account_number}")
+        print(f"   Buying Power: ${account.buying_power}")
+        print(f"   Cash: ${account.cash}")
+        print(f"   Account Status: {account.status}")
+        
+        # Action 2: Call get_latest_crypto_price() for 'BTC/USD'
+        print("\n3. Fetching latest BTC/USD price...")
+        btc_price = get_latest_crypto_price(client, 'BTC/USD')
+        
+        if not btc_price:
+            print("❌ FAILED: get_latest_crypto_price() returned None")
+            return False
+        
+        print(f"✅ SUCCESS: Latest BTC/USD price: ${btc_price:,.2f}")
+        
+        # Action 3: Place a limit BUY order with very small quantity at low price
+        print("\n4. Placing test limit BUY order...")
+        
+        # Use small quantity but ensure order value meets minimum ($10)
+        test_qty = 0.01  # 0.01 BTC at $1000 = $10 (meets minimum)
+        test_price = 1000.0  # Well below current market price
+        
+        print(f"   Placing order: {test_qty} BTC/USD @ ${test_price}")
+        
+        order = place_limit_buy_order(client, 'BTC/USD', test_qty, test_price, 'gtc')
+        
+        if not order:
+            print("❌ FAILED: place_limit_buy_order() returned None")
+            return False
+        
+        test_order_id = order.id
+        print(f"✅ SUCCESS: Order placed successfully")
+        print(f"   Order ID: {test_order_id}")
+        print(f"   Symbol: {order.symbol}")
+        print(f"   Quantity: {order.qty}")
+        print(f"   Limit Price: ${order.limit_price}")
+        print(f"   Status: {order.status}")
+        print(f"   Side: {order.side}")
+        
+        # Action 4: Get open orders and find our test order
+        print("\n5. Verifying order appears in open orders...")
+        open_orders = get_open_orders(client)
+        
+        if not isinstance(open_orders, list):
+            print("❌ FAILED: get_open_orders() did not return a list")
+            return False
+        
+        print(f"✅ SUCCESS: Retrieved {len(open_orders)} open orders")
+        
+        # Find our test order in the list
+        test_order_found = None
+        for open_order in open_orders:
+            if open_order.id == test_order_id:
+                test_order_found = open_order
+                break
+        
+        if not test_order_found:
+            print(f"❌ FAILED: Test order {test_order_id} not found in open orders")
+            print("   Available order IDs:", [o.id for o in open_orders])
+            return False
+        
+        print(f"✅ SUCCESS: Test order found in open orders")
+        print(f"   Order Status: {test_order_found.status}")
+        
+        # Verify the order status is acceptable (new, accepted, pending_new)
+        acceptable_statuses = ['new', 'accepted', 'pending_new']
+        if test_order_found.status not in acceptable_statuses:
+            print(f"❌ FAILED: Order status '{test_order_found.status}' not in expected statuses: {acceptable_statuses}")
+            return False
+        
+        print(f"✅ SUCCESS: Order status '{test_order_found.status}' is acceptable")
+        
+        # Action 5: Cancel the order
+        print("\n6. Canceling the test order...")
+        cancel_success = cancel_order(client, test_order_id)
+        
+        if not cancel_success:
+            print("❌ FAILED: cancel_order() returned False")
+            return False
+        
+        print(f"✅ SUCCESS: Order cancellation requested")
+        
+        # Action 6: Verify order is no longer in open orders or shows as canceled
+        print("\n7. Verifying order cancellation...")
+        
+        # Wait a moment for the cancellation to process
+        time.sleep(2)
+        
+        updated_open_orders = get_open_orders(client)
+        
+        # Check if our order is still in open orders
+        canceled_order_found = None
+        for open_order in updated_open_orders:
+            if open_order.id == test_order_id:
+                canceled_order_found = open_order
+                break
+        
+        if canceled_order_found:
+            # Order is still there, check if it's canceled
+            if canceled_order_found.status != 'canceled':
+                print(f"❌ FAILED: Order still exists but status is '{canceled_order_found.status}', not 'canceled'")
+                return False
+            else:
+                print(f"✅ SUCCESS: Order found with 'canceled' status")
+        else:
+            # Order is no longer in open orders (completely removed)
+            print(f"✅ SUCCESS: Order no longer appears in open orders (fully processed)")
+        
+        print("\n8. All Phase 2 tests completed successfully! 🎉")
+        return True
+        
+    except Exception as e:
+        print(f"❌ FAILED: Unexpected error during Phase 2 test: {e}")
+        logger.exception("Phase 2 integration test failed with exception")
+        return False
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -240,13 +417,32 @@ def main():
         print("Refer to README.md for required environment variables.")
         return
     
-    # Run Phase 1 tests
-    success = test_phase1_asset_and_cycle_crud()
+    # Track test results
+    phase1_success = False
+    phase2_success = False
     
-    if success:
+    # Run Phase 1 tests
+    print("\nRunning Phase 1 tests...")
+    phase1_success = test_phase1_asset_and_cycle_crud()
+    
+    # Run Phase 2 tests
+    print("\nRunning Phase 2 tests...")
+    phase2_success = test_phase2_alpaca_rest_api_order_cycle()
+    
+    # Final results
+    print("\n" + "="*60)
+    print("INTEGRATION TEST RESULTS SUMMARY")
+    print("="*60)
+    
+    print(f"Phase 1 (Database CRUD): {'✅ PASSED' if phase1_success else '❌ FAILED'}")
+    print(f"Phase 2 (Alpaca REST API): {'✅ PASSED' if phase2_success else '❌ FAILED'}")
+    
+    if phase1_success and phase2_success:
         print("\n🎉 ALL INTEGRATION TESTS PASSED!")
+        print("The DCA Trading Bot Phase 1 & 2 functionality is working correctly!")
     else:
         print("\n❌ SOME INTEGRATION TESTS FAILED!")
+        print("Please review the errors above and fix any issues.")
         sys.exit(1)
 
 

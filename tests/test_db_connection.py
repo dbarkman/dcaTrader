@@ -44,9 +44,7 @@ def test_get_db_connection_success(mock_getenv, mock_connect):
         password='test_pass',
         database='test_db',
         port=3306,
-        autocommit=False,
-        charset='utf8mb4',
-        collation='utf8mb4_unicode_ci'
+        autocommit=False
     )
 
 

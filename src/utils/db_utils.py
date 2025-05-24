@@ -18,34 +18,51 @@ logger = logging.getLogger(__name__)
 
 def get_db_connection() -> mysql.connector.MySQLConnection:
     """
-    Establishes and returns a MySQL database connection using credentials from .env file.
+    Establish and return a database connection using credentials from .env file.
     
     Returns:
-        mysql.connector.MySQLConnection: Database connection object
+        mysql.connector.connection.MySQLConnection: Database connection object
         
     Raises:
         mysql.connector.Error: If connection fails
+        ValueError: If required environment variables are missing
     """
     try:
+        # Load environment variables
+        host = os.getenv('DB_HOST')
+        user = os.getenv('DB_USER')
+        password = os.getenv('DB_PASSWORD')
+        database = os.getenv('DB_NAME')
+        port_str = os.getenv('DB_PORT', '3306')
+        
+        # Parse port number, handling potential comments or extra text
+        try:
+            # Extract just the numeric part, handling quotes and comments
+            port_clean = port_str.strip('"\'').split()[0]  # Remove quotes and take first word
+            port = int(port_clean)
+        except (ValueError, IndexError):
+            logger.warning(f"Invalid DB_PORT value '{port_str}', using default 3306")
+            port = 3306
+        
+        if not all([host, user, password, database]):
+            raise ValueError("Missing required database environment variables")
+        
+        logger.info(f"Connecting to database {database} at {host}:{port}")
+        
         connection = mysql.connector.connect(
-            host=os.getenv('DB_HOST', 'localhost'),
-            user=os.getenv('DB_USER'),
-            password=os.getenv('DB_PASSWORD'),
-            database=os.getenv('DB_NAME'),
-            port=int(os.getenv('DB_PORT', 3306)),
-            autocommit=False,
-            charset='utf8mb4',
-            collation='utf8mb4_unicode_ci'
+            host=host,
+            user=user,
+            password=password,
+            database=database,
+            port=port,
+            autocommit=False
         )
         
-        if connection.is_connected():
-            logger.info("Successfully connected to MySQL database")
-            return connection
-        else:
-            raise Error("Failed to establish database connection")
-            
-    except Error as e:
-        logger.error(f"Database connection error: {e}")
+        logger.info("Database connection established successfully")
+        return connection
+        
+    except mysql.connector.Error as e:
+        logger.error(f"Database connection failed: {e}")
         raise
     except Exception as e:
         logger.error(f"Unexpected error during database connection: {e}")
