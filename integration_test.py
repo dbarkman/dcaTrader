@@ -406,6 +406,121 @@ def test_phase2_alpaca_rest_api_order_cycle():
         return False
 
 
+def test_phase3_websocket_connection_and_data_receipt():
+    """
+    Integration Test for Phase 3: WebSocket Connection and Data Receipt
+    
+    Scenario: Verify that main_app.py connects to Alpaca WebSockets and receives data.
+    
+    NOTE: This is primarily a manual test that provides instructions for verification.
+    Automated WebSocket testing is complex and out of scope for this phase.
+    """
+    print("\n" + "="*70)
+    print("PHASE 3 INTEGRATION TEST: WebSocket Connection and Data Receipt")
+    print("="*70)
+    
+    print("\n📋 MANUAL TEST INSTRUCTIONS:")
+    print("This test requires manual observation of the WebSocket application.")
+    print("Please follow these steps to verify Phase 3 functionality:\n")
+    
+    print("1. ⚠️  PREPARATION:")
+    print("   • Ensure your .env file has valid Alpaca API credentials")
+    print("   • Make sure you're in your virtual environment (source venv/bin/activate)")
+    print("   • Have the Alpaca Paper Trading dashboard open in a web browser\n")
+    
+    print("2. 🚀 START THE WEBSOCKET APPLICATION:")
+    print("   Run the following command in a separate terminal:")
+    print("   $ python src/main_app.py\n")
+    
+    print("3. 👀 OBSERVE CONSOLE OUTPUT:")
+    print("   You should see log messages indicating:")
+    print("   ✅ 'DCA Trading Bot - Main WebSocket Application Starting'")
+    print("   ✅ 'Initializing CryptoDataStream (paper=True)'")
+    print("   ✅ 'Subscribed to BTC/USD quotes and trades'")
+    print("   ✅ 'Initializing TradingStream (paper=True)'")
+    print("   ✅ 'Subscribed to trade updates'")
+    print("   ✅ 'Starting WebSocket streams...'")
+    print("   ✅ 'Starting CryptoDataStream...'")
+    print("   ✅ 'Starting TradingStream...'\n")
+    
+    print("4. 💰 OBSERVE MARKET DATA:")
+    print("   Within 1-2 minutes, you should see regular messages like:")
+    print("   ✅ 'Quote: BTC/USD - Bid: $109000.00 @ 1.5, Ask: $109001.00 @ 2.0'")
+    print("   ✅ 'Trade: BTC/USD - Price: $109000.50, Size: 0.25, Time: ...'")
+    print("   (Prices will vary based on current market conditions)\n")
+    
+    print("5. 🧪 TEST TRADE UPDATES:")
+    print("   a. Go to your Alpaca Paper Trading dashboard")
+    print("   b. Place a small crypto order (e.g., 0.001 BTC market order)")
+    print("   c. Observe the main_app.py console output for trade update messages:")
+    print("      ✅ 'Trade Update: fill - Order ID: xyz, Symbol: BTC/USD, Side: buy, Status: filled'")
+    print("      ✅ 'Execution: Price $109000.25, Qty: 0.001' (if fill occurred)\n")
+    
+    print("6. 🛑 TEST GRACEFUL SHUTDOWN:")
+    print("   a. Press Ctrl+C in the terminal running main_app.py")
+    print("   b. Observe graceful shutdown messages:")
+    print("      ✅ 'Received signal 2, initiating graceful shutdown...'")
+    print("      ✅ 'CryptoDataStream stopped'")
+    print("      ✅ 'TradingStream stopped'")
+    print("      ✅ 'CryptoDataStream closed'")
+    print("      ✅ 'TradingStream closed'")
+    print("      ✅ 'DCA Trading Bot - Main WebSocket Application Stopped'\n")
+    
+    print("7. 📝 EXPECTED OUTCOMES:")
+    print("   ✅ Application starts without errors")
+    print("   ✅ Both WebSocket streams connect successfully")
+    print("   ✅ Regular BTC/USD market data is received and logged")
+    print("   ✅ Manual trades placed via dashboard trigger trade update messages")
+    print("   ✅ Application shuts down gracefully when interrupted")
+    print("   ✅ Log files are created in logs/main_app.log\n")
+    
+    print("8. 🚨 TROUBLESHOOTING:")
+    print("   If you encounter issues:")
+    print("   • Check logs/main_app.log for detailed error messages")
+    print("   • Verify .env file has correct Alpaca credentials")
+    print("   • Ensure internet connectivity for WebSocket connections")
+    print("   • Check that APCA_API_BASE_URL points to paper trading URL\n")
+    
+    print("📊 AUTOMATED VERIFICATION:")
+    print("   Checking basic prerequisites...")
+    
+    # Check environment variables
+    print("\n🔍 Checking environment variables...")
+    required_vars = ['APCA_API_KEY_ID', 'APCA_API_SECRET_KEY']
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        print(f"   ❌ Missing environment variables: {missing_vars}")
+        print("   Please update your .env file before running the manual test.")
+        return False
+    else:
+        print("   ✅ Required environment variables are present")
+    
+    # Check if main_app.py exists
+    print("\n📁 Checking main_app.py file...")
+    main_app_path = os.path.join('src', 'main_app.py')
+    if os.path.exists(main_app_path):
+        print("   ✅ src/main_app.py exists")
+    else:
+        print("   ❌ src/main_app.py not found")
+        return False
+    
+    # Check logs directory
+    print("\n📂 Checking logs directory...")
+    logs_dir = 'logs'
+    if not os.path.exists(logs_dir):
+        os.makedirs(logs_dir)
+        print("   ✅ Created logs directory")
+    else:
+        print("   ✅ Logs directory exists")
+    
+    print("\n🎉 Prerequisites check completed successfully!")
+    print("   You can now proceed with the manual test steps above.")
+    print("   This manual test is considered PASSED when all expected outcomes are observed.\n")
+    
+    return True
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -420,6 +535,7 @@ def main():
     # Track test results
     phase1_success = False
     phase2_success = False
+    phase3_success = False
     
     # Run Phase 1 tests
     print("\nRunning Phase 1 tests...")
@@ -429,6 +545,10 @@ def main():
     print("\nRunning Phase 2 tests...")
     phase2_success = test_phase2_alpaca_rest_api_order_cycle()
     
+    # Run Phase 3 tests (manual verification)
+    print("\nRunning Phase 3 tests...")
+    phase3_success = test_phase3_websocket_connection_and_data_receipt()
+    
     # Final results
     print("\n" + "="*60)
     print("INTEGRATION TEST RESULTS SUMMARY")
@@ -436,12 +556,14 @@ def main():
     
     print(f"Phase 1 (Database CRUD): {'✅ PASSED' if phase1_success else '❌ FAILED'}")
     print(f"Phase 2 (Alpaca REST API): {'✅ PASSED' if phase2_success else '❌ FAILED'}")
+    print(f"Phase 3 (WebSocket Streams): {'✅ READY FOR MANUAL TEST' if phase3_success else '❌ PREREQUISITES FAILED'}")
     
-    if phase1_success and phase2_success:
-        print("\n🎉 ALL INTEGRATION TESTS PASSED!")
-        print("The DCA Trading Bot Phase 1 & 2 functionality is working correctly!")
+    if phase1_success and phase2_success and phase3_success:
+        print("\n🎉 ALL AUTOMATED TESTS PASSED!")
+        print("Phase 3 requires manual verification - follow the instructions above.")
+        print("The DCA Trading Bot Phase 1, 2, & 3 functionality is ready for testing!")
     else:
-        print("\n❌ SOME INTEGRATION TESTS FAILED!")
+        print("\n❌ SOME TESTS FAILED!")
         print("Please review the errors above and fix any issues.")
         sys.exit(1)
 
