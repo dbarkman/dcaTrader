@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from alpaca.data.live import CryptoDataStream
 from alpaca.trading.stream import TradingStream
+from alpaca.trading.client import TradingClient
 from alpaca.common.exceptions import APIError
 import mysql.connector
 
@@ -725,8 +726,16 @@ async def on_trade_update(trade_update):
         else:
             logger.info(f"   Execution ID: {trade_update.execution_id} (price/qty data pending)")
     
-    # Additional details for specific events
-    if event == 'fill':
+    # Enhanced logic for different event types
+    if event == 'partial_fill':
+        # NEW: Only log partial fills, no database updates
+        logger.info(f"📊 PARTIAL FILL: {order.symbol} order {order.id}")
+        if hasattr(order, 'filled_qty') and hasattr(order, 'filled_avg_price'):
+            logger.info(f"   Filled Qty: {order.filled_qty}")
+            logger.info(f"   Filled Avg Price: ${order.filled_avg_price}")
+        logger.info("   ℹ️ No database updates for partial fills - waiting for final fill or cancellation")
+        
+    elif event == 'fill':
         logger.info(f"🎯 ORDER FILLED SUCCESSFULLY for {order.symbol}!")
         
         # Phase 7: Update dca_cycles table on BUY order fills
@@ -838,37 +847,61 @@ async def update_cycle_on_buy_fill(order, trade_update):
             logger.error(f"❌ Invalid fill data: filled_qty={filled_qty}, avg_fill_price={avg_fill_price}")
             return
         
-        # Step 4: Calculate new cycle values using Phase 7 formulas
+        # Step 4: Get Alpaca TradingClient and fetch current position (NEW ENHANCEMENT)
+        client = get_trading_client()
+        if not client:
+            logger.error(f"❌ Cannot get Alpaca client for position sync")
+            return
+        
+        # Fetch current Alpaca position to sync quantity and average price
+        alpaca_position = get_alpaca_position_by_symbol(client, symbol)
+        
+        # Step 5: Determine if this was a safety order (before position sync)
         current_qty = latest_cycle.quantity
-        current_avg_price = latest_cycle.average_purchase_price
-        
-        # Calculate new total quantity
-        current_total_qty = current_qty + filled_qty
-        
-        # Calculate new weighted average purchase price (Phase 7 formula)
-        if current_total_qty > 0:
-            if current_qty == 0:
-                # First purchase (base order) - use fill price as average
-                new_average_purchase_price = avg_fill_price
-            else:
-                # Weighted average: ((old_qty * old_price) + (new_qty * new_price)) / total_qty
-                total_cost = (current_avg_price * current_qty) + (avg_fill_price * filled_qty)
-                new_average_purchase_price = total_cost / current_total_qty
-        else:
-            # Fallback (shouldn't happen with valid data)
-            new_average_purchase_price = avg_fill_price
-        
-        # Step 5: Determine if this was a safety order (Phase 7 logic)
         is_safety_order = current_qty > Decimal('0')  # If we already had quantity, this is a safety order
         
-        # Step 6: Prepare updates dictionary (Phase 7 specification)
-        updates = {
-            'quantity': current_total_qty,
-            'average_purchase_price': new_average_purchase_price,
-            'last_order_fill_price': avg_fill_price,
-            'status': 'watching',
-            'latest_order_id': None  # Clear latest_order_id since order is filled
-        }
+        # Step 6: Prepare updates dictionary with Alpaca position sync (ENHANCED)
+        if alpaca_position:
+            # Use Alpaca as source of truth for quantity and average price
+            alpaca_qty = Decimal(str(alpaca_position.qty))
+            alpaca_avg_price = Decimal(str(alpaca_position.avg_entry_price))
+            
+            logger.info(f"📊 Syncing with Alpaca position: {alpaca_qty} @ ${alpaca_avg_price:.4f}")
+            
+            updates = {
+                'quantity': alpaca_qty,
+                'average_purchase_price': alpaca_avg_price,
+                'last_order_fill_price': avg_fill_price,
+                'status': 'watching',
+                'latest_order_id': None  # Clear latest_order_id since order is filled
+            }
+        else:
+            # Fallback: Use event data if Alpaca position not found
+            logger.warning(f"⚠️ No Alpaca position found for {symbol}, using event data as fallback")
+            
+            current_avg_price = latest_cycle.average_purchase_price
+            current_total_qty = current_qty + filled_qty
+            
+            # Calculate new weighted average purchase price (fallback formula)
+            if current_total_qty > 0:
+                if current_qty == 0:
+                    # First purchase (base order) - use fill price as average
+                    new_average_purchase_price = avg_fill_price
+                else:
+                    # Weighted average: ((old_qty * old_price) + (new_qty * new_price)) / total_qty
+                    total_cost = (current_avg_price * current_qty) + (avg_fill_price * filled_qty)
+                    new_average_purchase_price = total_cost / current_total_qty
+            else:
+                # Fallback (shouldn't happen with valid data)
+                new_average_purchase_price = avg_fill_price
+            
+            updates = {
+                'quantity': current_total_qty,
+                'average_purchase_price': new_average_purchase_price,
+                'last_order_fill_price': avg_fill_price,
+                'status': 'watching',
+                'latest_order_id': None  # Clear latest_order_id since order is filled
+            }
         
         # Increment safety_orders count if this was a safety order (Phase 7 requirement)
         if is_safety_order:
@@ -879,20 +912,17 @@ async def update_cycle_on_buy_fill(order, trade_update):
         
         if update_success:
             final_safety_orders = latest_cycle.safety_orders + (1 if is_safety_order else 0)
+            final_quantity = updates['quantity']
+            final_avg_price = updates['average_purchase_price']
             
             logger.info(f"✅ Cycle database updated successfully for {symbol}:")
-            logger.info(f"   🔄 Total Quantity: {current_total_qty}")
-            logger.info(f"   💰 Avg Purchase Price: ${new_average_purchase_price:.4f}")
+            logger.info(f"   🔄 Total Quantity: {final_quantity}")
+            logger.info(f"   💰 Avg Purchase Price: ${final_avg_price:.4f}")
             logger.info(f"   📊 Last Fill Price: ${avg_fill_price:.4f}")
             logger.info(f"   🛡️ Safety Orders: {final_safety_orders}")
             logger.info(f"   📈 Order Type: {'Safety Order' if is_safety_order else 'Base Order'}")
             logger.info(f"   ⚡ Status: watching (ready for take-profit)")
-            
-            # Lifecycle marker: Log cycle start/continuation
-            if not is_safety_order:
-                logger.info(f"🚀 CYCLE_START: {symbol} - New DCA cycle initiated with base order")
-            else:
-                logger.info(f"🔄 CYCLE_CONTINUE: {symbol} - Safety order #{final_safety_orders} added to active cycle")
+            logger.info(f"   🔗 Alpaca Sync: {'✅ Position synced' if alpaca_position else '⚠️ Fallback used'}")
             
             # Lifecycle marker: Log cycle start/continuation
             if not is_safety_order:
@@ -902,11 +932,36 @@ async def update_cycle_on_buy_fill(order, trade_update):
         else:
             logger.error(f"❌ Failed to update cycle database for {symbol}")
             logger.error(f"❌ CYCLE_ERROR: {symbol} - Failed to update cycle after buy fill")
-            logger.error(f"❌ CYCLE_ERROR: {symbol} - Failed to update cycle after buy fill")
             
     except Exception as e:
         logger.error(f"❌ Error updating cycle on BUY fill for {order.symbol}: {e}")
         logger.exception("Full traceback:")
+
+
+def get_alpaca_position_by_symbol(client: TradingClient, symbol: str) -> Optional:
+    """
+    Get a specific position by symbol from Alpaca.
+    
+    Args:
+        client: Initialized TradingClient
+        symbol: Asset symbol (e.g., 'BTC/USD')
+        
+    Returns:
+        Position object if found, None if no position or error
+    """
+    try:
+        positions = get_positions(client)
+        for position in positions:
+            if position.symbol == symbol and float(position.qty) != 0:
+                logger.debug(f"Found Alpaca position for {symbol}: {position.qty} @ ${position.avg_entry_price}")
+                return position
+        
+        logger.debug(f"No Alpaca position found for {symbol}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error fetching Alpaca position for {symbol}: {e}")
+        return None
 
 
 async def update_cycle_on_sell_fill(order, trade_update):
@@ -982,6 +1037,15 @@ async def update_cycle_on_sell_fill(order, trade_update):
             return
         
         logger.info(f"💰 Take-profit SELL filled at ${avg_fill_price:.4f}")
+        
+        # Step 3.5: Verify Alpaca position (optional but good for logging/verification)
+        client = get_trading_client()
+        if client:
+            alpaca_position = get_alpaca_position_by_symbol(client, symbol)
+            if alpaca_position:
+                logger.info(f"📊 Alpaca position after sell: {alpaca_position.qty} @ ${alpaca_position.avg_entry_price}")
+            else:
+                logger.info(f"📊 No Alpaca position found for {symbol} (expected after complete sell)")
         
         # Step 4: Update current cycle to 'complete' status
         from datetime import datetime
@@ -1106,13 +1170,85 @@ async def update_cycle_on_order_cancellation(order, event):
                        f"(not 'buying' or 'selling'). No action needed.")
             return
         
-        # Step 3: Revert cycle to 'watching' and clear latest_order_id
+        # Step 3: Enhanced cancellation handling with Alpaca position sync (for BUY orders)
         from models.cycle_data import update_cycle
         
-        updates = {
-            'status': 'watching',
-            'latest_order_id': None
-        }
+        if order.side.lower() == 'buy':
+            # For BUY order cancellations, sync with Alpaca position
+            logger.info(f"🔄 Processing BUY order {event} with Alpaca position sync...")
+            
+            # Get Alpaca client and fetch current position
+            client = get_trading_client()
+            alpaca_position = None
+            if client:
+                alpaca_position = get_alpaca_position_by_symbol(client, symbol)
+            
+            # Extract partial fill details if available
+            order_filled_qty = Decimal('0')
+            order_filled_avg_price = None
+            
+            if hasattr(order, 'filled_qty') and order.filled_qty:
+                try:
+                    order_filled_qty = Decimal(str(order.filled_qty))
+                except (ValueError, TypeError, decimal.InvalidOperation):
+                    logger.warning(f"Could not parse filled_qty from canceled order: {order.filled_qty}")
+            
+            if hasattr(order, 'filled_avg_price') and order.filled_avg_price and order_filled_qty > 0:
+                try:
+                    order_filled_avg_price = Decimal(str(order.filled_avg_price))
+                except (ValueError, TypeError, decimal.InvalidOperation):
+                    logger.warning(f"Could not parse filled_avg_price from canceled order: {order.filled_avg_price}")
+            
+            # Prepare updates with Alpaca position sync
+            updates = {
+                'status': 'watching',
+                'latest_order_id': None
+            }
+            
+            if alpaca_position:
+                # Use Alpaca as source of truth for quantity and average price
+                alpaca_qty = Decimal(str(alpaca_position.qty))
+                alpaca_avg_price = Decimal(str(alpaca_position.avg_entry_price))
+                
+                logger.info(f"📊 Syncing with Alpaca position after {event}: {alpaca_qty} @ ${alpaca_avg_price:.4f}")
+                
+                updates['quantity'] = alpaca_qty
+                updates['average_purchase_price'] = alpaca_avg_price
+                
+                # Update last_order_fill_price if there was a partial fill
+                if order_filled_qty > 0 and order_filled_avg_price:
+                    updates['last_order_fill_price'] = order_filled_avg_price
+                    
+                    # Determine if this was a safety order and increment count
+                    original_qty = cycle.quantity
+                    if original_qty > Decimal('0'):
+                        updates['safety_orders'] = cycle.safety_orders + 1
+                        logger.info(f"📊 Partial fill on safety order - incrementing count to {cycle.safety_orders + 1}")
+                
+            else:
+                # Fallback: Use current cycle data if Alpaca position not found
+                logger.warning(f"⚠️ No Alpaca position found for {symbol} after {event}, using current cycle data")
+                
+                # Still update last_order_fill_price if there was a partial fill
+                if order_filled_qty > 0 and order_filled_avg_price:
+                    updates['last_order_fill_price'] = order_filled_avg_price
+                    
+                    # Determine if this was a safety order and increment count
+                    original_qty = cycle.quantity
+                    if original_qty > Decimal('0'):
+                        updates['safety_orders'] = cycle.safety_orders + 1
+                        logger.info(f"📊 Partial fill on safety order - incrementing count to {cycle.safety_orders + 1}")
+            
+            # Log partial fill details if applicable
+            if order_filled_qty > 0:
+                logger.info(f"📊 Canceled order had partial fill: {order_filled_qty} @ ${order_filled_avg_price:.4f}")
+            
+        else:
+            # For SELL order cancellations, simple revert to watching
+            updates = {
+                'status': 'watching',
+                'latest_order_id': None
+            }
         
         success = update_cycle(cycle.id, updates)
         
@@ -1120,6 +1256,11 @@ async def update_cycle_on_order_cancellation(order, event):
             logger.info(f"✅ Order {order_id} for cycle {cycle.id} was {event}. "
                        f"Cycle status set to watching.")
             logger.info(f"🔄 Cycle {cycle.id} ({symbol}) reverted to 'watching' status - ready for new orders")
+            
+            if order.side.lower() == 'buy' and alpaca_position:
+                logger.info(f"   🔗 Alpaca Sync: ✅ Position synced after {event}")
+            elif order.side.lower() == 'buy':
+                logger.info(f"   🔗 Alpaca Sync: ⚠️ Fallback used after {event}")
         else:
             logger.error(f"❌ Failed to update cycle {cycle.id} after {event} order {order_id}")
         
