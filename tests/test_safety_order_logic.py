@@ -292,20 +292,23 @@ class TestSafetyOrderLogic:
         from datetime import datetime, timedelta
         
         # Mock recent order within cooldown period
-        recent_time = datetime.now() - timedelta(seconds=15)  # 15 seconds ago (< 30s cooldown)
+        recent_time = datetime.now() - timedelta(seconds=2)  # 2 seconds ago (< 5s default cooldown)
         
         with patch('main_app.recent_orders', {'BTC/USD': {'order_id': 'recent_123', 'timestamp': recent_time}}):
             with patch('main_app.datetime') as mock_datetime:
-                mock_datetime.now.return_value = datetime.now()
-                
-                mock_get_asset.return_value = self.mock_asset
-                mock_get_cycle.return_value = self.mock_cycle
-                
-                # Should return early due to recent order
-                check_and_place_safety_order(self.mock_quote)
-                
-                # Should NOT proceed to call get_asset_config since it returns early
-                mock_get_asset.assert_not_called()
+                with patch('os.getenv') as mock_getenv:
+                    # Mock the ORDER_COOLDOWN_SECONDS environment variable
+                    mock_getenv.return_value = '5'  # 5 second cooldown
+                    mock_datetime.now.return_value = datetime.now()
+                    
+                    mock_get_asset.return_value = self.mock_asset
+                    mock_get_cycle.return_value = self.mock_cycle
+                    
+                    # Should return early due to recent order
+                    check_and_place_safety_order(self.mock_quote)
+                    
+                    # Should NOT proceed to call get_asset_config since it returns early
+                    mock_get_asset.assert_not_called()
 
 
 class TestSafetyOrderCalculations:

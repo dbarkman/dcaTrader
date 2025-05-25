@@ -124,7 +124,7 @@ def check_and_place_base_order(quote):
     try:
         # Step 1: Check for recent orders to prevent duplicates
         now = datetime.now()
-        recent_order_cooldown = 30  # seconds
+        recent_order_cooldown = int(os.getenv('ORDER_COOLDOWN_SECONDS', '5'))  # Default 5 seconds
         
         if symbol in recent_orders:
             time_since_order = now - recent_orders[symbol]['timestamp']
@@ -286,7 +286,7 @@ def check_and_place_safety_order(quote):
     try:
         # Step 1: Check for recent orders to prevent duplicates
         now = datetime.now()
-        recent_order_cooldown = 30  # seconds
+        recent_order_cooldown = int(os.getenv('ORDER_COOLDOWN_SECONDS', '5'))  # Default 5 seconds
         
         if symbol in recent_orders:
             time_since_order = now - recent_orders[symbol]['timestamp']
@@ -463,7 +463,7 @@ def check_and_place_take_profit_order(quote):
     try:
         # Step 1: Check for recent orders to prevent duplicates
         now = datetime.now()
-        recent_order_cooldown = 30  # seconds
+        recent_order_cooldown = int(os.getenv('ORDER_COOLDOWN_SECONDS', '5'))  # Default 5 seconds
         
         if symbol in recent_orders:
             time_since_order = now - recent_orders[symbol]['timestamp']
