@@ -20,6 +20,7 @@ from decimal import Decimal
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import decimal
+from pathlib import Path
 
 # Add src directory to path for imports
 sys.path.insert(0, os.path.dirname(__file__))
@@ -55,6 +56,33 @@ trading_stream_ref = None
 
 # Global tracking for recent orders to prevent duplicates
 recent_orders = {}  # symbol -> {'order_id': str, 'timestamp': datetime}
+
+# PID file configuration
+PID_FILE_PATH = Path(__file__).parent.parent / 'main_app.pid'
+
+
+def create_pid_file():
+    """
+    Create PID file with current process ID.
+    """
+    try:
+        with open(PID_FILE_PATH, 'w') as f:
+            f.write(str(os.getpid()))
+        logger.info(f"Created PID file: {PID_FILE_PATH} (PID: {os.getpid()})")
+    except Exception as e:
+        logger.error(f"Failed to create PID file: {e}")
+
+
+def remove_pid_file():
+    """
+    Remove PID file on clean shutdown.
+    """
+    try:
+        if PID_FILE_PATH.exists():
+            PID_FILE_PATH.unlink()
+            logger.info(f"Removed PID file: {PID_FILE_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to remove PID file: {e}")
 
 
 def validate_environment() -> bool:
@@ -1208,6 +1236,9 @@ def main():
         logger.error("Environment validation failed. Exiting.")
         sys.exit(1)
     
+    # Create PID file for watchdog monitoring
+    create_pid_file()
+    
     # Set up signal handlers for graceful shutdown
     setup_signal_handlers()
     
@@ -1245,6 +1276,9 @@ def main():
                 logger.info("TradingStream closed")
             except:
                 pass
+        
+        # Remove PID file on shutdown
+        remove_pid_file()
         
         logger.info("DCA Trading Bot - Main WebSocket Application Stopped")
 

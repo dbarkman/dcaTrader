@@ -4545,6 +4545,223 @@ def run_phase12_test():
     return test_phase12_consistency_checker_scenarios()
 
 
+def test_phase13_watchdog_restarts_app():
+    """
+    Phase 13 Integration Test: Watchdog Script Monitoring and Restart
+    
+    Tests the watchdog script's ability to:
+    1. Detect when main_app.py is not running
+    2. Successfully restart main_app.py
+    3. Detect when main_app.py is already running
+    4. Handle various error conditions
+    """
+    print("=" * 60)
+    print("PHASE 13 INTEGRATION TEST: Watchdog Script")
+    print("=" * 60)
+    
+    import subprocess
+    import time
+    import os
+    import signal
+    from pathlib import Path
+    
+    # Paths
+    watchdog_script = Path(__file__).parent / 'scripts' / 'watchdog.py'
+    main_app_script = Path(__file__).parent / 'src' / 'main_app.py'
+    pid_file = Path(__file__).parent / 'main_app.pid'
+    
+    # Track processes for cleanup
+    main_app_process = None
+    
+    try:
+        print("\n🔧 Step 1: Verifying watchdog script exists...")
+        if not watchdog_script.exists():
+            print(f"❌ FAILED: Watchdog script not found at {watchdog_script}")
+            return False
+        print(f"✅ Watchdog script found: {watchdog_script}")
+        
+        print("\n🔧 Step 2: Ensuring main_app.py is NOT running...")
+        # Clean up any existing PID file
+        if pid_file.exists():
+            try:
+                pid_file.unlink()
+                print(f"   ✅ Removed existing PID file: {pid_file}")
+            except Exception as e:
+                print(f"   ⚠️ Could not remove PID file: {e}")
+        
+        # Kill any existing main_app.py processes
+        try:
+            result = subprocess.run(['pkill', '-f', 'main_app.py'], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                print("   ✅ Killed existing main_app.py processes")
+            else:
+                print("   ✅ No existing main_app.py processes found")
+        except Exception as e:
+            print(f"   ⚠️ Could not check for existing processes: {e}")
+        
+        # Wait a moment for cleanup
+        time.sleep(2)
+        
+        print("\n🎯 SCENARIO 1: main_app.py is NOT running - watchdog should start it")
+        print("🔧 Step 3: Running watchdog script...")
+        
+        # Run watchdog script
+        watchdog_result = subprocess.run(
+            ['python', str(watchdog_script)],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        print(f"   Watchdog exit code: {watchdog_result.returncode}")
+        if watchdog_result.stdout:
+            print(f"   Watchdog stdout: {watchdog_result.stdout[:500]}...")
+        if watchdog_result.stderr:
+            print(f"   Watchdog stderr: {watchdog_result.stderr[:500]}...")
+        
+        print("\n🔧 Step 4: Verifying main_app.py was started...")
+        
+        # Check if PID file was created
+        if not pid_file.exists():
+            print("❌ FAILED: PID file was not created")
+            return False
+        
+        # Read PID from file
+        try:
+            with open(pid_file, 'r') as f:
+                pid_str = f.read().strip()
+            pid = int(pid_str)
+            print(f"   ✅ PID file created with PID: {pid}")
+        except Exception as e:
+            print(f"❌ FAILED: Could not read PID file: {e}")
+            return False
+        
+        # Check if process is actually running
+        try:
+            os.kill(pid, 0)  # Signal 0 just checks if process exists
+            print(f"   ✅ Process {pid} is running")
+        except OSError:
+            print(f"❌ FAILED: Process {pid} is not running")
+            return False
+        
+        # Verify it's actually main_app.py
+        try:
+            result = subprocess.run(['ps', '-p', str(pid), '-o', 'cmd='], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0 and 'main_app.py' in result.stdout:
+                print(f"   ✅ Confirmed process is main_app.py: {result.stdout.strip()}")
+            else:
+                print(f"❌ FAILED: Process is not main_app.py: {result.stdout}")
+                return False
+        except Exception as e:
+            print(f"⚠️ Could not verify process command: {e}")
+        
+        print("\n🎯 SCENARIO 2: main_app.py IS running - watchdog should detect it")
+        print("🔧 Step 5: Running watchdog script again...")
+        
+        # Run watchdog script again
+        watchdog_result2 = subprocess.run(
+            ['python', str(watchdog_script)],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        print(f"   Watchdog exit code: {watchdog_result2.returncode}")
+        if watchdog_result2.stdout:
+            print(f"   Watchdog stdout: {watchdog_result2.stdout[:500]}...")
+        
+        # Watchdog should exit successfully (code 0) when app is running
+        if watchdog_result2.returncode != 0:
+            print(f"❌ FAILED: Watchdog returned non-zero exit code: {watchdog_result2.returncode}")
+            return False
+        
+        # Check that the log indicates app is running (could be in stdout or stderr)
+        watchdog_output = watchdog_result2.stdout + watchdog_result2.stderr
+        if "main_app.py is running" in watchdog_output:
+            print("   ✅ Watchdog correctly detected running app")
+        else:
+            print("❌ FAILED: Watchdog did not detect running app")
+            print(f"   Debug - stdout: {watchdog_result2.stdout[:200]}...")
+            print(f"   Debug - stderr: {watchdog_result2.stderr[:200]}...")
+            return False
+        
+        print("\n🔧 Step 6: Stopping main_app.py for cleanup...")
+        
+        # Stop the main_app.py process
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"   ✅ Sent SIGTERM to process {pid}")
+            
+            # Wait for graceful shutdown
+            time.sleep(3)
+            
+            # Check if process stopped
+            try:
+                os.kill(pid, 0)
+                print(f"   ⚠️ Process {pid} still running, sending SIGKILL")
+                os.kill(pid, signal.SIGKILL)
+                time.sleep(1)
+            except OSError:
+                print(f"   ✅ Process {pid} stopped gracefully")
+                
+        except OSError as e:
+            print(f"   ⚠️ Could not stop process: {e}")
+        
+        # Verify PID file was cleaned up
+        if not pid_file.exists():
+            print("   ✅ PID file was cleaned up")
+        else:
+            print("   ⚠️ PID file still exists, removing manually")
+            try:
+                pid_file.unlink()
+            except Exception as e:
+                print(f"   ⚠️ Could not remove PID file: {e}")
+        
+        print("\n✅ PHASE 13 TEST PASSED!")
+        print("   • Watchdog correctly detected missing app and restarted it")
+        print("   • Watchdog correctly detected running app and took no action")
+        print("   • PID file management working correctly")
+        print("   • Process monitoring and verification working")
+        
+        return True
+        
+    except subprocess.TimeoutExpired:
+        print("❌ FAILED: Watchdog script timed out")
+        return False
+    except Exception as e:
+        print(f"❌ PHASE 13 TEST FAILED: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+    
+    finally:
+        # Cleanup: Ensure main_app.py is stopped and PID file is removed
+        print("\n🧹 Cleaning up...")
+        
+        # Kill any main_app.py processes
+        try:
+            subprocess.run(['pkill', '-f', 'main_app.py'], 
+                          capture_output=True, text=True)
+            print("   ✅ Cleaned up any remaining main_app.py processes")
+        except Exception as e:
+            print(f"   ⚠️ Could not clean up processes: {e}")
+        
+        # Remove PID file
+        if pid_file.exists():
+            try:
+                pid_file.unlink()
+                print(f"   ✅ Removed PID file: {pid_file}")
+            except Exception as e:
+                print(f"   ⚠️ Could not remove PID file: {e}")
+
+
+def run_phase13_test():
+    """Wrapper function to run the Phase 13 test."""
+    return test_phase13_watchdog_restarts_app()
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -4667,6 +4884,15 @@ def main():
                 print("\n❌ Phase 12: ❌ FAILED")
                 sys.exit(1)
             return
+        elif phase_arg == 'phase13':
+            print("\n🎯 Running ONLY Phase 13 tests...")
+            phase13_success = run_phase13_test()
+            if phase13_success:
+                print("\n🎉 Phase 13: ✅ PASSED")
+            else:
+                print("\n❌ Phase 13: ❌ FAILED")
+                sys.exit(1)
+            return
         elif phase_arg == 'simulated':
             print("\n🎯 Running ONLY Simulated WebSocket Handler tests...")
             
@@ -4760,6 +4986,7 @@ def main():
     phase10_success = False
     phase11_success = False
     phase12_success = False
+    phase13_success = False
     
     # Run Phase 1 tests
     print("\nRunning Phase 1 tests...")
@@ -4809,6 +5036,10 @@ def main():
     print("\nRunning Phase 12 tests...")
     phase12_success = run_phase12_test()
     
+    # Run Phase 13 tests (Watchdog Script)
+    print("\nRunning Phase 13 tests...")
+    phase13_success = run_phase13_test()
+    
     # Final results
     print("\n" + "="*60)
     print("INTEGRATION TEST RESULTS SUMMARY")
@@ -4826,8 +5057,9 @@ def main():
     print(f"Phase 10 (Order Manager Caretaker Script): {'✅ PASSED' if phase10_success else '❌ FAILED'}")
     print(f"Phase 11 (Cooldown Manager Caretaker Script): {'✅ PASSED' if phase11_success else '❌ FAILED'}")
     print(f"Phase 12 (Consistency Checker Caretaker Script): {'✅ PASSED' if phase12_success else '❌ FAILED'}")
+    print(f"Phase 13 (Watchdog Script): {'✅ PASSED' if phase13_success else '❌ FAILED'}")
     
-    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success, phase9_success, phase10_success, phase11_success, phase12_success]):
+    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success, phase9_success, phase10_success, phase11_success, phase12_success, phase13_success]):
         print("\n🎉 ALL PHASES PASSED!")
         print("The DCA Trading Bot is fully functional and ready for production!")
     else:
@@ -4852,6 +5084,7 @@ def print_help():
     print("  python integration_test.py phase10         # Run only Phase 10 (Order Manager Caretaker Script)")
     print("  python integration_test.py phase11         # Run only Phase 11 (Cooldown Manager Caretaker Script)")
     print("  python integration_test.py phase12         # Run only Phase 12 (Consistency Checker Caretaker Script)")
+    print("  python integration_test.py phase13         # Run only Phase 13 (Watchdog Script)")
     print("  python integration_test.py simulated       # Run all simulated WebSocket handler tests")
     print("  python integration_test.py sim-base        # Run simulated base order placement test")
     print("  python integration_test.py sim-safety      # Run simulated safety order placement test")
@@ -4872,6 +5105,7 @@ def print_help():
     print("  Phase 10: Tests Order Manager Caretaker Script")
     print("  Phase 11: Tests Cooldown Manager Caretaker Script")
     print("  Phase 12: Tests Consistency Checker Caretaker Script")
+    print("  Phase 13: Tests Watchdog Script")
     print("\nSIMULATED TEST DESCRIPTIONS:")
     print("  simulated: Run all simulated WebSocket handler tests (fast, no waiting)")
     print("  sim-base: Test MarketDataStream base order placement with mock quote")
