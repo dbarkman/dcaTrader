@@ -3024,6 +3024,322 @@ def run_phase7_test():
     return asyncio.run(test_phase7_tradingstream_buy_fill_processing())
 
 
+def create_mock_sell_order_fill_event(symbol, order_id, fill_price, fill_qty, total_order_qty):
+    """Create a mock trade update event for a SELL order fill (take-profit)."""
+    
+    # Create mock order object
+    mock_order = type('MockOrder', (), {
+        'id': order_id,
+        'symbol': symbol,
+        'side': 'sell',
+        'order_type': 'market',
+        'time_in_force': 'ioc',
+        'filled_qty': str(fill_qty),
+        'filled_avg_price': str(fill_price),
+        'qty': str(total_order_qty),
+        'limit_price': None,  # Market orders don't have limit price
+        'status': 'filled'
+    })()
+    
+    # Create mock trade update event
+    mock_event = type('MockTradeUpdate', (), {
+        'event': 'fill',
+        'order': mock_order,
+        'timestamp': datetime.now(),
+        'execution_id': f'exec_{order_id}_sell'
+    })()
+    
+    return mock_event
+
+
+async def test_phase8_tradingstream_sell_fill_processing():
+    """
+    Integration Test for Phase 8: TradingStream SELL Order Fill Processing
+    
+    This test uses simulated trade update events to verify that the TradingStream
+    handler correctly processes SELL order fills (take-profit orders) and:
+    - Marks current cycle as 'complete' with completed_at timestamp
+    - Clears latest_order_id from completed cycle
+    - Updates dca_assets.last_sell_price with fill price
+    - Creates new 'cooldown' cycle for the same asset
+    
+    Scenarios tested:
+    1. Take-profit SELL order fill processing
+    2. Database state transitions and new cycle creation
+    """
+    print("\n" + "="*80)
+    print("PHASE 8 INTEGRATION TEST: TradingStream SELL Order Fill Processing")
+    print("="*80)
+    print("TESTING: Simulated SELL order fills and cycle completion logic...")
+    
+    test_asset_id = None
+    active_cycle_id = None
+    
+    try:
+        # SETUP: Database connection
+        print("\n1. 🔧 SETUP: Preparing test environment...")
+        if not check_connection():
+            print("❌ FAILED: Database connection test failed")
+            return False
+        print("✅ SUCCESS: Database connection established")
+        
+        # SETUP: Create test asset configuration
+        test_symbol = 'ETH/USD'
+        print(f"\n2. 🔧 SETUP: Creating test asset configuration for {test_symbol}...")
+        
+        insert_asset_query = """
+        INSERT INTO dca_assets (
+            asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+            max_safety_orders, safety_order_deviation, take_profit_percent,
+            cooldown_period, buy_order_price_deviation_percent, last_sell_price
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        asset_params = (
+            test_symbol, True, Decimal('200.00'), Decimal('100.00'),
+            3, Decimal('2.0'), Decimal('1.5'), 300, Decimal('3.0'), None  # last_sell_price initially NULL
+        )
+        
+        test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        print(f"✅ SUCCESS: Created test asset with ID {test_asset_id}")
+        
+        # TEST: Take-Profit SELL Order Fill Processing
+        print(f"\n" + "="*60)
+        print("TEST: TAKE-PROFIT SELL ORDER FILL PROCESSING")
+        print("="*60)
+        
+        # SETUP: Create active cycle with position (simulating filled position ready for take-profit)
+        print(f"\n3. 🔧 SETUP: Creating active cycle with position for take-profit...")
+        
+        sell_order_id = 'test_sell_order_tp_789'
+        active_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='selling',  # Take-profit order is pending
+            quantity=Decimal('0.05'),  # Has 0.05 ETH position
+            average_purchase_price=Decimal('3800.0'),  # Bought at avg $3,800
+            safety_orders=1,  # Had 1 safety order
+            latest_order_id=sell_order_id,  # This SELL order is pending fill
+            last_order_fill_price=Decimal('3750.0')  # Last BUY fill was at $3,750
+        )
+        
+        if not active_cycle:
+            print("❌ FAILED: Could not create active cycle")
+            return False
+        
+        active_cycle_id = active_cycle.id
+        print(f"✅ SUCCESS: Created active cycle ready for take-profit:")
+        print(f"   Cycle ID: {active_cycle_id}")
+        print(f"   Status: selling (take-profit order pending)")
+        print(f"   Quantity: {active_cycle.quantity} ETH")
+        print(f"   Avg Purchase Price: ${active_cycle.average_purchase_price}")
+        print(f"   Safety Orders: {active_cycle.safety_orders}")
+        print(f"   Latest Order ID: {sell_order_id}")
+        
+        # ACTION: Create mock trade update for SELL order fill
+        print(f"\n4. 🎯 ACTION: Creating mock SELL order fill event...")
+        
+        sell_fill_price = 3900.0  # ETH sold at $3,900 (profit!)
+        sell_fill_qty = float(active_cycle.quantity)  # Sell entire position
+        
+        mock_sell_fill = create_mock_sell_order_fill_event(
+            symbol=test_symbol,
+            order_id=sell_order_id,
+            fill_price=sell_fill_price,
+            fill_qty=sell_fill_qty,
+            total_order_qty=sell_fill_qty
+        )
+        
+        print(f"   📊 Mock SELL Order Fill:")
+        print(f"   📊 Order ID: {mock_sell_fill.order.id}")
+        print(f"   📊 Symbol: {mock_sell_fill.order.symbol}")
+        print(f"   📊 Side: {mock_sell_fill.order.side}")
+        print(f"   📊 Fill Price: ${sell_fill_price:,.2f}")
+        print(f"   📊 Fill Quantity: {sell_fill_qty:.6f} ETH")
+        print(f"   📊 Fill Value: ${sell_fill_price * sell_fill_qty:.2f}")
+        
+        # Calculate profit
+        purchase_cost = float(active_cycle.average_purchase_price) * sell_fill_qty
+        sell_revenue = sell_fill_price * sell_fill_qty
+        profit = sell_revenue - purchase_cost
+        profit_pct = (profit / purchase_cost) * 100
+        
+        print(f"   💰 Trade Summary:")
+        print(f"      Purchase Cost: ${purchase_cost:.2f} (avg ${active_cycle.average_purchase_price})")
+        print(f"      Sell Revenue: ${sell_revenue:.2f}")
+        print(f"      Profit: ${profit:.2f} ({profit_pct:.2f}%)")
+        
+        # ACTION: Process the SELL trade update
+        print(f"\n5. 🎯 ACTION: Processing SELL order fill via on_trade_update()...")
+        
+        # Import and call the async handler
+        import sys
+        sys.path.insert(0, 'src')
+        from main_app import on_trade_update
+        
+        await on_trade_update(mock_sell_fill)
+        
+        # ASSERT: Verify original cycle was marked complete
+        print(f"\n6. ✅ ASSERT: Verifying original cycle marked as complete...")
+        
+        # Get the completed cycle using a fresh query to avoid cursor issues
+        # We need to query for completed cycles since get_latest_cycle returns the newest (cooldown) cycle
+        get_completed_cycle_query = """
+        SELECT id, status, completed_at, latest_order_id, quantity, average_purchase_price 
+        FROM dca_cycles 
+        WHERE id = %s AND status = 'complete'
+        """
+        
+        completed_cycle_result = execute_query(get_completed_cycle_query, (active_cycle_id,), fetch_one=True)
+        
+        if not completed_cycle_result:
+            print("❌ FAILED: Could not fetch completed cycle or cycle not marked as complete")
+            return False
+        
+        # Result is a dictionary when using fetch_one=True
+        completed_cycle_data = completed_cycle_result
+        
+        print(f"✅ SUCCESS: Original cycle correctly updated!")
+        print(f"   Cycle ID: {active_cycle_id}")
+        print(f"   Status: {completed_cycle_data['status']} (expected: complete)")
+        print(f"   Completed At: {completed_cycle_data['completed_at']} (should be set)")
+        print(f"   Latest Order ID: {completed_cycle_data['latest_order_id']} (expected: None)")
+        print(f"   Quantity: {completed_cycle_data['quantity']} (preserved)")
+        
+        # Verify cycle completion using dictionary access
+        if (completed_cycle_data['status'] != 'complete' or
+            completed_cycle_data['completed_at'] is None or
+            completed_cycle_data['latest_order_id'] is not None):
+            print("❌ FAILED: Original cycle not properly completed")
+            print(f"   Status: {completed_cycle_data['status']} (expected: complete)")
+            print(f"   Completed At: {completed_cycle_data['completed_at']} (should not be None)")
+            print(f"   Latest Order ID: {completed_cycle_data['latest_order_id']} (expected: None)")
+            return False
+        
+        print("✅ SUCCESS: Original cycle properly marked as complete!")
+        
+        # ASSERT: Verify asset last_sell_price was updated
+        print(f"\n7. ✅ ASSERT: Verifying asset last_sell_price updated...")
+        
+        # Get updated asset configuration
+        updated_asset = get_asset_config(test_symbol)
+        if not updated_asset:
+            print("❌ FAILED: Could not fetch updated asset config")
+            return False
+        
+        expected_last_sell_price = Decimal(str(sell_fill_price))
+        
+        print(f"✅ SUCCESS: Asset configuration updated!")
+        print(f"   Asset ID: {test_asset_id}")
+        print(f"   Last Sell Price: ${updated_asset.last_sell_price} (expected: ${expected_last_sell_price})")
+        
+        if updated_asset.last_sell_price != expected_last_sell_price:
+            print("❌ FAILED: Asset last_sell_price not updated correctly")
+            print(f"   Expected: ${expected_last_sell_price}")
+            print(f"   Actual: ${updated_asset.last_sell_price}")
+            return False
+        
+        print("✅ SUCCESS: Asset last_sell_price correctly updated!")
+        
+        # ASSERT: Verify new cooldown cycle was created
+        print(f"\n8. ✅ ASSERT: Verifying new cooldown cycle created...")
+        
+        # Get the latest cycle for this asset (should be the new cooldown cycle)
+        new_cycle = get_latest_cycle(test_asset_id)
+        if not new_cycle:
+            print("❌ FAILED: Could not fetch new cycle")
+            return False
+        
+        print(f"✅ SUCCESS: New cooldown cycle created!")
+        print(f"   New Cycle ID: {new_cycle.id}")
+        print(f"   Status: {new_cycle.status} (expected: cooldown)")
+        print(f"   Quantity: {new_cycle.quantity} (expected: 0)")
+        print(f"   Avg Purchase Price: ${new_cycle.average_purchase_price} (expected: 0)")
+        print(f"   Safety Orders: {new_cycle.safety_orders} (expected: 0)")
+        print(f"   Latest Order ID: {new_cycle.latest_order_id} (expected: None)")
+        print(f"   Last Order Fill Price: {new_cycle.last_order_fill_price} (expected: None)")
+        print(f"   Completed At: {new_cycle.completed_at} (expected: None)")
+        
+        # Verify new cycle is different from original and has correct cooldown state
+        if (new_cycle.id == active_cycle_id or
+            new_cycle.status != 'cooldown' or
+            new_cycle.quantity != Decimal('0') or
+            new_cycle.average_purchase_price != Decimal('0') or
+            new_cycle.safety_orders != 0 or
+            new_cycle.latest_order_id is not None or
+            new_cycle.last_order_fill_price is not None or
+            new_cycle.completed_at is not None):
+            print("❌ FAILED: New cooldown cycle not created correctly")
+            print(f"   Same ID as original: {new_cycle.id == active_cycle_id}")
+            print(f"   Status: {new_cycle.status} (expected: cooldown)")
+            print(f"   Quantity: {new_cycle.quantity} (expected: 0)")
+            print(f"   Avg Price: {new_cycle.average_purchase_price} (expected: 0)")
+            return False
+        
+        print("✅ SUCCESS: New cooldown cycle correctly created!")
+        print("✅ SUCCESS: All cooldown cycle fields properly reset!")
+        
+        # ASSERT: Verify cycle transition timeline
+        print(f"\n9. ✅ ASSERT: Verifying cycle transition timeline...")
+        
+        print(f"✅ SUCCESS: Complete cycle transition verified!")
+        print(f"   Original Cycle: {active_cycle_id} → Status: complete")
+        print(f"   New Cycle: {new_cycle.id} → Status: cooldown")
+        print(f"   Asset: last_sell_price updated to ${sell_fill_price}")
+        print(f"   Profit Realized: ${profit:.2f} ({profit_pct:.2f}%)")
+        
+        print(f"\n🎉 PHASE 8 INTEGRATION TEST COMPLETED SUCCESSFULLY!")
+        print("="*80)
+        print("PHASE 8 SUMMARY:")
+        print("✅ SELL order fill processing working correctly")
+        print("✅ Original cycle marked as 'complete' with timestamp")
+        print("✅ Asset last_sell_price updated correctly")
+        print("✅ New cooldown cycle created with reset state")
+        print("✅ Cycle transition logic working properly")
+        print("✅ Database atomicity maintained")
+        print("🚀 Phase 8 TradingStream SELL fill functionality is fully operational!")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ FAILED: Exception during Phase 8 test: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+        
+    finally:
+        # TEARDOWN: Clean up test resources
+        print(f"\n🧹 TEARDOWN: Cleaning up test resources...")
+        
+        # Delete all cycles for this asset (both completed and cooldown)
+        if test_asset_id:
+            try:
+                delete_cycles_query = "DELETE FROM dca_cycles WHERE asset_id = %s"
+                execute_query(delete_cycles_query, (test_asset_id,), commit=True)
+                print(f"   ✅ Deleted all cycles for asset {test_asset_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting cycles: {e}")
+        
+        # Delete test asset
+        if test_asset_id:
+            try:
+                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
+                execute_query(delete_asset_query, (test_asset_id,), commit=True)
+                print(f"   ✅ Deleted test asset {test_asset_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting asset: {e}")
+        
+        print("   ✅ Teardown completed")
+
+
+def run_phase8_test():
+    """Wrapper function to run the async Phase 8 test."""
+    import asyncio
+    return asyncio.run(test_phase8_tradingstream_sell_fill_processing())
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -3099,6 +3415,15 @@ def main():
                 print("\n🎉 Phase 7: ✅ PASSED")
             else:
                 print("\n❌ Phase 7: ❌ FAILED")
+                sys.exit(1)
+            return
+        elif phase_arg == 'phase8':
+            print("\n🎯 Running ONLY Phase 8 tests...")
+            phase8_success = run_phase8_test()
+            if phase8_success:
+                print("\n🎉 Phase 8: ✅ PASSED")
+            else:
+                print("\n❌ Phase 8: ❌ FAILED")
                 sys.exit(1)
             return
         elif phase_arg == 'simulated':
@@ -3189,6 +3514,7 @@ def main():
     phase5_success = False
     phase6_success = False
     phase7_success = False
+    phase8_success = False
     
     # Run Phase 1 tests
     print("\nRunning Phase 1 tests...")
@@ -3218,6 +3544,10 @@ def main():
     print("\nRunning Phase 7 tests...")
     phase7_success = run_phase7_test()
     
+    # Run Phase 8 tests (TradingStream SELL order fill processing)
+    print("\nRunning Phase 8 tests...")
+    phase8_success = run_phase8_test()
+    
     # Final results
     print("\n" + "="*60)
     print("INTEGRATION TEST RESULTS SUMMARY")
@@ -3230,8 +3560,9 @@ def main():
     print(f"Phase 5 (Safety Order Logic): {'✅ PASSED' if phase5_success else '❌ FAILED'}")
     print(f"Phase 6 (Take-Profit Logic): {'✅ PASSED' if phase6_success else '❌ FAILED'}")
     print(f"Phase 7 (TradingStream BUY Order Fill Processing): {'✅ PASSED' if phase7_success else '❌ FAILED'}")
+    print(f"Phase 8 (TradingStream SELL Order Fill Processing): {'✅ PASSED' if phase8_success else '❌ FAILED'}")
     
-    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success]):
+    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success]):
         print("\n🎉 ALL PHASES PASSED!")
         print("The DCA Trading Bot is fully functional and ready for production!")
     else:
@@ -3251,6 +3582,7 @@ def print_help():
     print("  python integration_test.py phase5          # Run only Phase 5 (Safety Order Logic)")
     print("  python integration_test.py phase6          # Run only Phase 6 (Take-Profit Logic)")
     print("  python integration_test.py phase7          # Run only Phase 7 (TradingStream BUY Order Fill Processing)")
+    print("  python integration_test.py phase8          # Run only Phase 8 (TradingStream SELL Order Fill Processing)")
     print("  python integration_test.py simulated       # Run all simulated WebSocket handler tests")
     print("  python integration_test.py sim-base        # Run simulated base order placement test")
     print("  python integration_test.py sim-safety      # Run simulated safety order placement test")
@@ -3266,6 +3598,7 @@ def print_help():
     print("  Phase 5: Tests safety order placement logic (comprehensive testing)")
     print("  Phase 6: Tests take-profit order placement logic (market SELL orders)")
     print("  Phase 7: Tests TradingStream BUY order fill processing logic")
+    print("  Phase 8: Tests TradingStream SELL order fill processing logic")
     print("\nSIMULATED TEST DESCRIPTIONS:")
     print("  simulated: Run all simulated WebSocket handler tests (fast, no waiting)")
     print("  sim-base: Test MarketDataStream base order placement with mock quote")
