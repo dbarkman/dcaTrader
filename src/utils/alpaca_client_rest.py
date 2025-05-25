@@ -282,6 +282,9 @@ def place_market_sell_order(
         
     except Exception as e:
         logger.error(f"Error placing market sell order for {symbol}: {e}")
+        logger.error(f"Order details: qty={qty}, symbol={symbol}, time_in_force={time_in_force}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 

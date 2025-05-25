@@ -543,7 +543,13 @@ def check_and_place_take_profit_order(quote):
             
             safety_deviation_decimal = asset_config.safety_order_deviation / Decimal('100')
             safety_trigger_price = latest_cycle.last_order_fill_price * (Decimal('1') - safety_deviation_decimal)
-            ask_price_decimal = Decimal(str(ask_price))
+            
+            # Safely convert ask_price to Decimal
+            try:
+                ask_price_decimal = Decimal(str(ask_price))
+            except (ValueError, TypeError, decimal.InvalidOperation) as e:
+                logger.debug(f"Invalid ask_price for {symbol}: {ask_price} (type: {type(ask_price)}) - skipping")
+                return
             
             if ask_price_decimal <= safety_trigger_price:
                 safety_order_would_trigger = True

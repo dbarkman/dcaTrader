@@ -868,7 +868,7 @@ def test_phase3_websocket_connection_and_data_receipt():
         # Wait for both streams to connect
         connection_patterns = {
             'crypto_connected': r'connected to wss://stream\.data\.alpaca\.markets',
-            'trading_connected': r'connected to.*wss://paper-api\.alpaca\.markets',
+            'trading_connected': r'connected to.*BaseURL\.TRADING_STREAM_PAPER',
             'subscriptions': r'subscribed to trades.*quotes'
         }
         

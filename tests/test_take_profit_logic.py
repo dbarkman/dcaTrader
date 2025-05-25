@@ -95,7 +95,8 @@ class TestTakeProfitConditions:
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_trading_client')
     @patch('main_app.place_market_sell_order')
-    def test_take_profit_conditions_met(self, mock_place_order, mock_get_client, 
+    @patch('main_app.update_cycle')
+    def test_take_profit_conditions_met(self, mock_update_cycle, mock_place_order, mock_get_client, 
                                        mock_get_cycle, mock_get_asset):
         """Test that take-profit order is placed when all conditions are met"""
         
@@ -111,6 +112,7 @@ class TestTakeProfitConditions:
         mock_order = Mock()
         mock_order.id = 'order_123'
         mock_place_order.return_value = mock_order
+        mock_update_cycle.return_value = True
         
         # Execute
         with patch('main_app.recent_orders', {}):
@@ -259,7 +261,8 @@ class TestTakeProfitCalculations:
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_trading_client')
     @patch('main_app.place_market_sell_order')
-    def test_take_profit_quantity_uses_full_position(self, mock_place_order, mock_get_client,
+    @patch('main_app.update_cycle')
+    def test_take_profit_quantity_uses_full_position(self, mock_update_cycle, mock_place_order, mock_get_client,
                                                     mock_get_cycle, mock_get_asset):
         """Test that take-profit sells the entire position quantity"""
         
@@ -277,6 +280,7 @@ class TestTakeProfitCalculations:
         mock_asset_config.max_safety_orders = 3
         
         mock_cycle = Mock()
+        mock_cycle.id = 200  # Add explicit ID
         mock_cycle.status = 'watching'
         mock_cycle.quantity = Decimal('2.75')  # Specific quantity
         mock_cycle.average_purchase_price = Decimal('3700.0')  # $3,700 avg
@@ -294,6 +298,7 @@ class TestTakeProfitCalculations:
         mock_order = Mock()
         mock_order.id = 'order_456'
         mock_place_order.return_value = mock_order
+        mock_update_cycle.return_value = True
         
         # Execute
         with patch('main_app.recent_orders', {}):
