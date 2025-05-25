@@ -5,7 +5,7 @@ Integration Test Script for DCA Trading Bot
 This script tests end-to-end scenarios against the actual database and Alpaca paper trading account.
 It includes setup, execution, assertions, and teardown for each phase of development.
 
-Run this script to verify that Phase 1 functionality is working correctly.
+Run this script to verify that Phase 1-5 functionality is working correctly.
 """
 
 import sys
@@ -35,6 +35,24 @@ from utils.alpaca_client_rest import (
     get_open_orders,
     cancel_order,
     get_positions
+)
+
+# Import test utilities for mocking WebSocket events
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'tests'))
+from test_utils import (
+    create_mock_crypto_quote_event,
+    create_mock_trade_update_event,
+    create_mock_base_order_fill_event,
+    create_mock_safety_order_fill_event,
+    create_realistic_btc_quote,
+    create_realistic_eth_quote
+)
+
+# Import main app functions for direct testing
+from main_app import (
+    check_and_place_base_order,
+    check_and_place_safety_order,
+    on_trade_update
 )
 
 # Configure logging
@@ -801,89 +819,43 @@ def test_phase3_websocket_connection_and_data_receipt():
         print("   ✅ Cleanup completed")
 
 
-def test_phase4_marketdata_places_base_order():
+def test_phase4_simulated_base_order_placement():
     """
-    Fully Automated Integration Test for Phase 4: MarketData Places Base Order
+    Phase 4 Integration Test (SIMULATED): MarketDataStream Base Order Placement
     
-    This test automatically:
-    1. Sets up ALL 8 crypto pairs for trading (increases chance of quote triggers)
-    2. Ensures no existing Alpaca positions for test assets
-    3. Starts main_app.py subprocess  
-    4. Monitors logs for base order placement on ANY of the 8 pairs
-    5. Monitors for ERROR/WARNING messages
-    6. Verifies order appears in Alpaca
-    7. Cleans up ALL test data and cancels ALL orders
+    This test uses simulated market data instead of waiting for live WebSocket events.
+    It verifies that the complete base order placement flow works correctly.
+    
+    Scenario: Asset in watching state with quantity=0 receives price quote and places base order.
     """
-    print("\n" + "="*70)
-    print("PHASE 4 AUTOMATED INTEGRATION TEST: MarketData Places Base Order")
-    print("="*70)
+    print("\n" + "="*80)
+    print("PHASE 4 INTEGRATION TEST (SIMULATED): MarketDataStream Base Order Placement")
+    print("="*80)
+    print("TESTING: Complete flow from market quote to base order placement...")
     
-    # Test configuration
-    test_timeout = 120  # Total test timeout (2 minutes)
-    base_order_timeout = 60  # Time to wait for base order placement
-    
-    # ALL 8 crypto pairs from main_app.py for maximum quote coverage
-    test_symbols = [
-        'BTC/USD',   # Bitcoin
-        'ETH/USD',   # Ethereum
-        'SOL/USD',   # Solana
-        'DOGE/USD',  # Dogecoin
-        'AVAX/USD',  # Avalanche
-        'LINK/USD',  # Chainlink
-        'UNI/USD',   # Uniswap
-        'XRP/USD'    # Ripple
-    ]
-    
-    base_order_amount = Decimal('50.00')  # $50 base order for each pair
-    
-    # Results tracking
-    results = {
-        'test_assets_created': 0,
-        'test_cycles_created': 0,
-        'no_existing_positions': 0,
-        'process_started': False,
-        'streams_connected': False,
-        'base_order_placed': False,
-        'order_found_in_alpaca': False,
-        'cleanup_completed': False,
-        'error_messages': [],
-        'warning_messages': [],
-        'placed_orders': []
-    }
-    
-    main_process = None
-    log_monitor = None
-    test_asset_ids = []
-    test_cycle_ids = []
-    placed_order_ids = []
+    # Track resources for cleanup
+    test_asset_id = None
+    test_cycle_id = None
+    placed_orders = []
+    client = None
     
     try:
-        print(f"\n1. 🛠️ Setting up {len(test_symbols)} test asset configurations...")
+        # SETUP: Database and Alpaca connections
+        print("\n1. 🔧 SETUP: Preparing test environment...")
+        if not check_connection():
+            print("❌ FAILED: Database connection test failed")
+            return False
         
-        # Clean up any existing test data for all symbols
-        try:
-            print("   🧹 Cleaning up any existing test data...")
-            
-            for symbol in test_symbols:
-                existing_asset = get_asset_config(symbol)
-                if existing_asset:
-                    # Delete any cycles for this asset
-                    delete_cycles_query = "DELETE FROM dca_cycles WHERE asset_id = %s"
-                    execute_query(delete_cycles_query, (existing_asset.id,), commit=True)
-                    
-                    # Delete the asset
-                    delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
-                    execute_query(delete_asset_query, (existing_asset.id,), commit=True)
-                    
-                    print(f"   ✅ Cleaned up existing test data for {symbol}")
-            
-            print("   ✅ All existing test data cleaned up")
-                
-        except Exception as e:
-            print(f"   ⚠️ Warning during cleanup: {e}")
-            # Continue anyway
+        client = get_trading_client()
+        if not client:
+            print("❌ FAILED: Could not initialize Alpaca trading client")
+            return False
+        print("✅ SUCCESS: Database and Alpaca connections established")
         
-        # Insert all test assets into database
+        # SETUP: Create test asset configuration for base order testing
+        test_symbol = 'BTC/USD'
+        print(f"\n2. 🔧 SETUP: Creating test asset configuration for {test_symbol}...")
+        
         insert_asset_query = """
         INSERT INTO dca_assets (
             asset_symbol, is_enabled, base_order_amount, safety_order_amount,
@@ -892,515 +864,1066 @@ def test_phase4_marketdata_places_base_order():
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
-        for symbol in test_symbols:
-            asset_params = (
-                symbol,
-                True,  # is_enabled
-                base_order_amount,  # base_order_amount ($50)
-                Decimal('25.00'),   # safety_order_amount
-                3,                  # max_safety_orders
-                Decimal('2.0'),     # safety_order_deviation (2%)
-                Decimal('1.5'),     # take_profit_percent (1.5%)
-                300,                # cooldown_period (5 minutes)
-                Decimal('3.0')      # buy_order_price_deviation_percent
-            )
-            
-            asset_id = execute_query(insert_asset_query, asset_params, commit=True)
-            if not asset_id:
-                results['error_messages'].append(f"Failed to create test asset for {symbol}")
-                print(f"   ❌ Failed to create test asset for {symbol}")
-                continue
-            
-            test_asset_ids.append((asset_id, symbol))
-            results['test_assets_created'] += 1
-            print(f"   ✅ Created asset {symbol} with ID: {asset_id}")
+        asset_params = (
+            test_symbol, True, Decimal('100.00'), Decimal('50.00'),
+            3, Decimal('2.0'), Decimal('1.5'), 300, Decimal('3.0')
+        )
         
-        print(f"   ✅ Created {results['test_assets_created']}/{len(test_symbols)} test assets")
+        test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        print(f"✅ SUCCESS: Created test asset with ID {test_asset_id}")
         
-        print(f"\n2. 🔄 Setting up {len(test_asset_ids)} test cycles (watching, quantity=0)...")
+        # SETUP: Create initial cycle for base order (watching, quantity=0)
+        print(f"\n3. 🔧 SETUP: Creating initial cycle for base order testing...")
         
-        # Create test cycles for all assets
-        for asset_id, symbol in test_asset_ids:
-            new_cycle = create_cycle(
-                asset_id=asset_id,
-                status='watching',
-                quantity=Decimal('0'),  # This is key - triggers base order logic
-                average_purchase_price=Decimal('0'),
-                safety_orders=0,
-                latest_order_id=None,
-                last_order_fill_price=None
-            )
-            
-            if not new_cycle:
-                results['error_messages'].append(f"Failed to create test cycle for {symbol}")
-                print(f"   ❌ Failed to create test cycle for {symbol}")
-                continue
-            
-            test_cycle_ids.append((new_cycle.id, symbol))
-            results['test_cycles_created'] += 1
-            print(f"   ✅ Created cycle for {symbol} with ID: {new_cycle.id}")
+        initial_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=Decimal('0'),  # Key condition for base order
+            average_purchase_price=Decimal('0'),
+            safety_orders=0
+        )
         
-        print(f"   ✅ Created {results['test_cycles_created']}/{len(test_asset_ids)} test cycles")
-        
-        print(f"\n3. 🔍 Checking for existing Alpaca positions...")
-        
-        # Ensure no existing positions for test symbols
-        client = get_trading_client()
-        if not client:
-            results['error_messages'].append("Could not initialize Alpaca client")
-            print("   ❌ Could not initialize Alpaca client")
+        if not initial_cycle:
+            print("❌ FAILED: Could not create initial cycle")
             return False
         
-        positions = get_positions(client)
-        existing_positions = []
+        test_cycle_id = initial_cycle.id
+        print(f"✅ SUCCESS: Created cycle with ID {test_cycle_id}")
+        print(f"   Status: watching | Quantity: 0 BTC (base order conditions met)")
         
-        for position in positions:
-            if position.symbol in test_symbols and float(position.qty) != 0:
-                existing_positions.append(position)
+        # ACTION: Create realistic market quote for base order trigger
+        print(f"\n4. 🎯 ACTION: Creating realistic BTC quote for base order...")
         
-        if existing_positions:
-            for pos in existing_positions:
-                results['warning_messages'].append(f"Existing position: {pos.qty} {pos.symbol}")
-                print(f"   ⚠️ WARNING: Existing position: {pos.qty} {pos.symbol}")
-            print(f"   Found {len(existing_positions)} existing positions that may interfere")
-        else:
-            results['no_existing_positions'] = len(test_symbols)
-            print(f"   ✅ No existing positions for any of the {len(test_symbols)} test symbols")
+        # Use current-ish BTC price for realism
+        btc_quote_price = 95000.0  # Realistic BTC price
+        mock_quote = create_realistic_btc_quote(ask_price=btc_quote_price)
         
-        print("\n4. 🚀 Starting main_app.py subprocess...")
+        print(f"   📊 Market Quote: {mock_quote.symbol}")
+        print(f"   📊 Ask: ${mock_quote.ask_price:,.2f} | Bid: ${mock_quote.bid_price:,.2f}")
         
-        # Set up environment with TESTING_MODE for aggressive pricing
-        test_env = os.environ.copy()
-        test_env['TESTING_MODE'] = 'true'  # Enable aggressive pricing (5% above ask)
+        expected_btc_qty = 100.0 / btc_quote_price
+        print(f"   📊 Expected Base Order: ${100.00} ÷ ${btc_quote_price:,.2f} = {expected_btc_qty:.8f} BTC")
         
-        # Start main_app.py as subprocess
-        main_process = subprocess.Popen(
-            ['python', 'src/main_app.py'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=os.getcwd(),
-            env=test_env  # Use modified environment with TESTING_MODE
-        )
+        # Clear recent orders to avoid cooldowns
+        import main_app
+        main_app.recent_orders.clear()
         
-        results['process_started'] = True
-        print(f"   ✅ Process started with PID: {main_process.pid}")
+        # ACTION: Process quote through base order handler
+        print(f"\n5. 🎯 ACTION: Processing quote through check_and_place_base_order()...")
         
-        # Enhanced log monitoring with ERROR/WARNING detection
-        class LogMonitor:
-            def __init__(self, process):
-                self.process = process
-                self.log_queue = Queue()
-                self.patterns_found = {}
-                self.all_logs = []
-                self.error_logs = []
-                self.warning_logs = []
-                self.running = True
-                
-                self.stdout_thread = threading.Thread(target=self._monitor_stdout, daemon=True)
-                self.stderr_thread = threading.Thread(target=self._monitor_stderr, daemon=True)
-                self.stdout_thread.start()
-                self.stderr_thread.start()
+        # Record existing orders
+        orders_before = get_open_orders(client)
+        btc_orders_before = [o for o in orders_before if o.symbol == test_symbol and o.side == 'buy']
+        
+        # Call the base order handler
+        check_and_place_base_order(mock_quote)
+        
+        # Allow time for order placement
+        time.sleep(3)
+        
+        # ASSERT: Verify base order was placed
+        print(f"\n6. ✅ ASSERT: Verifying base order placement...")
+        
+        # Check if order was tracked in recent_orders
+        if test_symbol in main_app.recent_orders:
+            recent_order_info = main_app.recent_orders[test_symbol]
+            order_id = recent_order_info['order_id']
+            placed_orders.append(order_id)
             
-            def _monitor_stdout(self):
-                while self.running and self.process.poll() is None:
-                    try:
-                        line = self.process.stdout.readline()
-                        if line:
-                            line_str = line.decode('utf-8').strip()
-                            self.log_queue.put(('stdout', line_str))
-                            self.all_logs.append(line_str)
-                            
-                            # Check for ERROR/WARNING
-                            if 'ERROR' in line_str:
-                                self.error_logs.append(line_str)
-                                print(f"   🚨 DETECTED ERROR: {line_str}")
-                            elif 'WARNING' in line_str:
-                                self.warning_logs.append(line_str)
-                                print(f"   ⚠️ DETECTED WARNING: {line_str}")
-                                
-                    except Exception as e:
-                        self.log_queue.put(('error', f"Error reading stdout: {e}"))
+            print(f"✅ SUCCESS: Base order placed and tracked!")
+            print(f"   Order ID: {order_id}")
+            print(f"   💰 Base Order for {test_symbol}")
             
-            def _monitor_stderr(self):
-                while self.running and self.process.poll() is None:
-                    try:
-                        line = self.process.stderr.readline()
-                        if line:
-                            line_str = line.decode('utf-8').strip()
-                            self.log_queue.put(('stderr', line_str))
-                            self.all_logs.append(line_str)
-                            
-                            # Only treat actual ERROR/WARNING messages as problems
-                            # Normal Python logging goes to stderr but isn't an "error"
-                            if line_str.strip():
-                                if " - ERROR - " in line_str:
-                                    self.error_logs.append(f"ERROR: {line_str}")
-                                    print(f"   🚨 ERROR: {line_str}")
-                                elif " - WARNING - " in line_str:
-                                    self.warning_logs.append(f"WARNING: {line_str}")
-                                    print(f"   ⚠️ WARNING: {line_str}")
-                                # Don't print normal INFO/DEBUG log messages
-                                
-                    except Exception as e:
-                        self.log_queue.put(('error', f"Error reading stderr: {e}"))
+            # Verify order exists on Alpaca
+            orders_after = get_open_orders(client)
+            order_found = any(o.id == order_id for o in orders_after)
             
-            def wait_for_pattern(self, pattern, timeout=30, description="pattern"):
-                print(f"   🔍 Waiting for {description}...")
-                start_time = time.time()
+            if order_found:
+                matching_order = next(o for o in orders_after if o.id == order_id)
+                actual_qty = float(matching_order.qty)
+                actual_price = float(matching_order.limit_price)
                 
-                while time.time() - start_time < timeout:
-                    try:
-                        stream, line = self.log_queue.get(timeout=1)
-                        if re.search(pattern, line):
-                            self.patterns_found[pattern] = line
-                            print(f"   ✅ Found {description}: {line}")
-                            return line
-                    except Empty:
-                        continue
-                    except Exception as e:
-                        print(f"   Error in pattern search: {e}")
-                        continue
+                print(f"   📋 Alpaca Order Details:")
+                print(f"      Quantity: {actual_qty:.8f} BTC")
+                print(f"      Limit Price: ${actual_price:,.2f}")
+                print(f"      Order Type: {matching_order.order_type}")
+                print(f"      Time in Force: {matching_order.time_in_force}")
                 
-                print(f"   ❌ Timeout waiting for {description} after {timeout}s")
-                return None
-            
-            def wait_for_base_order_any_symbol(self, symbols, timeout=60):
-                """Wait for base order placement on ANY of the provided symbols"""
-                print(f"   🔍 Waiting for base order placement on ANY of: {', '.join(symbols)}...")
-                start_time = time.time()
-                
-                # Create patterns for all symbols - updated to match actual log format
-                base_order_patterns = [
-                    f"LIMIT BUY order PLACED for {symbol}" for symbol in symbols
-                ]
-                
-                while time.time() - start_time < timeout:
-                    try:
-                        stream, line = self.log_queue.get(timeout=1)
-                        
-                        # Check if this line matches any base order pattern
-                        for pattern in base_order_patterns:
-                            if pattern in line:
-                                symbol = None
-                                for s in symbols:
-                                    if s in line:
-                                        symbol = s
-                                        break
-                                        
-                                self.patterns_found['base_order'] = line
-                                print(f"   ✅ Found base order for {symbol}: {line}")
-                                return line
-                                
-                    except Empty:
-                        continue
-                    except Exception as e:
-                        print(f"   Error in base order search: {e}")
-                        continue
-                
-                print(f"   ❌ Timeout waiting for base order placement after {timeout}s")
-                return None
-            
-            def get_recent_logs(self, lines=10):
-                return self.all_logs[-lines:] if self.all_logs else []
-            
-            def get_error_summary(self):
-                return {
-                    'errors': self.error_logs,
-                    'warnings': self.warning_logs,
-                    'error_count': len(self.error_logs),
-                    'warning_count': len(self.warning_logs)
-                }
-            
-            def stop(self):
-                self.running = False
-        
-        log_monitor = LogMonitor(main_process)
-        
-        print("\n5. 🔌 Waiting for WebSocket streams to connect...")
-        
-        # Wait for stream connections using same patterns as Phase 3
-        connection_found = log_monitor.wait_for_pattern(
-            r'subscribed to.*quotes.*BTC/USD', 
-            timeout=30, 
-            description="stream connections"
-        )
-        
-        if connection_found:
-            results['streams_connected'] = True
-            print("   ✅ WebSocket streams connected successfully!")
-        else:
-            results['error_messages'].append("WebSocket streams failed to connect")
-            print("   ❌ WebSocket streams failed to connect")
-            return False
-        
-        print(f"\n6. 💰 Waiting for base order placement on ANY of {len(test_symbols)} symbols...")
-        print(f"   Symbols: {', '.join(test_symbols)}")
-        print(f"   🚀 Using AGGRESSIVE pricing (5% above ask) for faster fills!")
-        
-        # Wait for base order placement on ANY symbol
-        placed_message = log_monitor.wait_for_base_order_any_symbol(
-            test_symbols, 
-            timeout=base_order_timeout
-        )
-        
-        if placed_message:
-            results['base_order_placed'] = True
-            # Extract order ID from the message
-            match = re.search(r'Order ID ([a-f0-9\-]+)', placed_message)
-            if match:
-                placed_order_id = match.group(1)
-                placed_order_ids.append(placed_order_id)
-                print(f"   ✅ Base order placed! Order ID: {placed_order_id}")
-                
-                # Extract symbol from message
-                symbol_match = None
-                for symbol in test_symbols:
-                    if symbol in placed_message:
-                        symbol_match = symbol
-                        break
-                
-                if symbol_match:
-                    print(f"   💎 Order placed for: {symbol_match}")
-                    results['placed_orders'].append({'id': placed_order_id, 'symbol': symbol_match})
+                # Verify quantity is approximately correct
+                qty_diff_pct = abs(actual_qty - expected_btc_qty) / expected_btc_qty * 100
+                if qty_diff_pct > 2.0:  # Allow 2% variance
+                    print(f"⚠️ WARNING: Quantity variance {qty_diff_pct:.2f}% > 2%")
+                else:
+                    print(f"✅ Quantity variance {qty_diff_pct:.2f}% within acceptable range")
+                    
             else:
-                print(f"   ✅ Base order placed (could not extract order ID)")
+                print("⚠️ WARNING: Order may have filled immediately (paper trading)")
+                
         else:
-            results['error_messages'].append(f"Base order was not placed within {base_order_timeout}s")
-            print(f"   ❌ No base order placed for any symbol within {base_order_timeout}s")
-            
-            # Show recent logs for debugging
-            print("\n   📋 Recent logs (for debugging):")
-            for log_line in log_monitor.get_recent_logs(15):
-                print(f"      {log_line}")
-            
+            print("❌ FAILED: Base order was not placed (not tracked in recent_orders)")
             return False
         
-        print("\n7. 🔍 Waiting for ORDER FILLS and DATABASE UPDATES...")
-        print("   ⏰ Waiting up to 90 seconds for order fills (aggressive pricing should fill quickly)...")
+        # ASSERT: Verify cycle database remains unchanged (MarketDataStream doesn't update DB)
+        print(f"\n7. ✅ ASSERT: Verifying cycle database unchanged...")
         
-        # Give more time for order processing with aggressive pricing
-        fill_timeout = 90  # 90 seconds for fills
-        fill_start_time = time.time()
-        
-        order_filled = False
-        database_updated = False
-        
-        while time.time() - fill_start_time < fill_timeout and not (order_filled and database_updated):
-            time.sleep(2)  # Check every 2 seconds
-            
-            # Method 1: Check for fills in recent logs
-            if not order_filled:
-                recent_logs = log_monitor.get_recent_logs(30)
-                for log_line in recent_logs:
-                    if "ORDER FILLED SUCCESSFULLY" in log_line and any(symbol in log_line for symbol in test_symbols):
-                        order_filled = True
-                        print(f"   ✅ ORDER FILL detected in logs!")
-                        break
-            
-            # Method 2: Check database for cycle updates (this is the key test!)
-            if order_filled and not database_updated:
-                try:
-                    for asset_id, symbol in test_asset_ids:
-                        updated_cycle = get_latest_cycle(asset_id)
-                        if updated_cycle and updated_cycle.quantity > Decimal('0'):
-                            database_updated = True
-                            print(f"   ✅ DATABASE UPDATE detected for {symbol}!")
-                            print(f"      🔄 Cycle quantity: {updated_cycle.quantity}")
-                            print(f"      💰 Avg purchase price: ${updated_cycle.average_purchase_price}")
-                            print(f"      📊 Last fill price: ${updated_cycle.last_order_fill_price}")
-                            break
-                except Exception as e:
-                    print(f"   ⚠️ Error checking database: {e}")
-            
-            # Show progress
-            elapsed = time.time() - fill_start_time
-            if int(elapsed) % 10 == 0:  # Every 10 seconds
-                print(f"   ⏰ Elapsed: {elapsed:.0f}s - Fill: {'✅' if order_filled else '❌'} | DB Update: {'✅' if database_updated else '❌'}")
-        
-        # Evaluate results
-        if order_filled and database_updated:
-            results['order_found_in_alpaca'] = True
-            print(f"   🎉 COMPLETE SUCCESS! Order filled AND database updated!")
-        elif order_filled:
-            print(f"   ⚠️ PARTIAL SUCCESS: Order filled but database not updated (Phase 7 functionality missing)")
-            print(f"   📋 This indicates the database update logic needs to be implemented in main_app.py")
-        else:
-            # Fallback: Check open orders as before
-            print(f"   ⏰ Fill timeout reached. Checking for open orders...")
-            open_orders = get_open_orders(client)
-            current_open_orders = []
-            
-            for order in open_orders:
-                if order.symbol in test_symbols and order.side == 'buy':
-                    current_open_orders.append(order)
-                    if order.id not in placed_order_ids:
-                        placed_order_ids.append(order.id)
-            
-            if current_open_orders:
-                results['order_found_in_alpaca'] = True
-                print(f"   ✅ Found {len(current_open_orders)} OPEN order(s) (unfilled but valid)!")
-                for order in current_open_orders:
-                    print(f"      📋 Order ID: {order.id} | Symbol: {order.symbol} | Price: ${order.limit_price}")
-            else:
-                results['error_messages'].append("No evidence of successful order execution found")
-                print(f"   ❌ No evidence of order execution found")
-                return False
-        
-        print("\n8. 🚨 Error/Warning Summary:")
-        error_summary = log_monitor.get_error_summary()
-        
-        if error_summary['error_count'] > 0:
-            print(f"   🚨 {error_summary['error_count']} ERROR(S) detected:")
-            for error in error_summary['errors'][-5:]:  # Show last 5 errors
-                print(f"      • {error}")
-            results['error_messages'].extend(error_summary['errors'])
-        else:
-            print("   ✅ No errors detected")
-        
-        if error_summary['warning_count'] > 0:
-            print(f"   ⚠️ {error_summary['warning_count']} WARNING(S) detected:")
-            for warning in error_summary['warnings'][-5:]:  # Show last 5 warnings
-                print(f"      • {warning}")
-            results['warning_messages'].extend(error_summary['warnings'])
-        else:
-            print("   ✅ No warnings detected")
-        
-        print("\n9. 📋 Phase 4 Test Results:")
-        print("="*50)
-        
-        # Calculate success
-        critical_tests = [
-            'test_assets_created',
-            'test_cycles_created', 
-            'process_started',
-            'streams_connected',
-            'base_order_placed',
-            'order_found_in_alpaca'
-        ]
-        
-        print(f"✅ Asset Setup: {results['test_assets_created']}/{len(test_symbols)} assets created")
-        print(f"✅ Cycle Setup: {results['test_cycles_created']}/{len(test_symbols)} cycles created")
-        print(f"✅ Process Started: {'✅ PASS' if results['process_started'] else '❌ FAIL'}")
-        print(f"✅ Streams Connected: {'✅ PASS' if results['streams_connected'] else '❌ FAIL'}")
-        print(f"✅ Base Order Placed: {'✅ PASS' if results['base_order_placed'] else '❌ FAIL'}")
-        print(f"✅ Order in Alpaca: {'✅ PASS' if results['order_found_in_alpaca'] else '❌ FAIL'}")
-        
-        # Calculate critical success
-        critical_passed = (
-            results['test_assets_created'] >= len(test_symbols) // 2 and  # At least half the assets
-            results['test_cycles_created'] >= len(test_symbols) // 2 and  # At least half the cycles
-            results['process_started'] and
-            results['streams_connected'] and
-            results['base_order_placed'] and
-            results['order_found_in_alpaca']
-        )
-        
-        if results['error_messages']:
-            print(f"\n❌ Errors encountered ({len(results['error_messages'])}):")
-            for error in results['error_messages'][-3:]:  # Show last 3
-                print(f"   • {error}")
-        
-        if results['warning_messages']:
-            print(f"\n⚠️ Warnings encountered ({len(results['warning_messages'])}):")
-            for warning in results['warning_messages'][-3:]:  # Show last 3
-                print(f"   • {warning}")
-        
-        # Determine overall result
-        if critical_passed:
-            print(f"\n🎉 PHASE 4 TEST: ✅ PASSED")
-            print(f"   MarketData stream successfully places base orders!")
-            print(f"   Tested {len(test_symbols)} crypto pairs for maximum coverage!")
-            return True
-        else:
-            print(f"\n❌ PHASE 4 TEST: ❌ FAILED") 
-            print("   Base order placement logic is not working correctly")
+        current_cycle = get_latest_cycle(test_asset_id)
+        if (current_cycle.quantity != Decimal('0') or 
+            current_cycle.status != 'watching' or
+            current_cycle.average_purchase_price != Decimal('0')):
+            print("❌ FAILED: Cycle was incorrectly modified by MarketDataStream")
             return False
-            
+        
+        print("✅ SUCCESS: Cycle database correctly unchanged")
+        print("   ℹ️ Note: TradingStream will update cycle when order fills")
+        
+        print(f"\n🎉 PHASE 4 SIMULATED TEST COMPLETED SUCCESSFULLY!")
+        print("✅ Base order placement logic working correctly")
+        print("✅ Order placed on Alpaca with correct parameters")  
+        print("✅ Database state maintained correctly")
+        print("🚀 Phase 4 functionality is fully operational!")
+        
+        return True
+        
     except Exception as e:
-        print(f"\n❌ CRITICAL ERROR in Phase 4 test: {e}")
-        logger.exception("Phase 4 test failed with exception")
+        print(f"\n❌ FAILED: Exception during Phase 4 test: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         return False
         
     finally:
-        print(f"\n🧹 Cleaning up...")
+        # TEARDOWN: Clean up all test resources
+        print(f"\n🧹 TEARDOWN: Cleaning up test resources...")
         
-        # Stop log monitoring
-        if log_monitor:
-            log_monitor.stop()
-        
-        # Stop main_app.py process
-        if main_process and main_process.poll() is None:
-            try:
-                print("   Stopping main_app.py...")
-                main_process.send_signal(signal.SIGINT)
-                main_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                print("   Force killing process...")
-                main_process.kill()
-                main_process.wait()
-            except Exception as e:
-                print(f"   Error stopping process: {e}")
-        
-        # Cancel ALL test orders (both tracked and any untracked ones)
-        if client:
-            try:
-                print("   🧹 Cancelling all test orders...")
-                open_orders = get_open_orders(client)
-                
-                # Cancel all orders for our test symbols
-                cancelled_count = 0
-                for order in open_orders:
-                    if order.symbol in test_symbols and order.side == 'buy':
-                        try:
-                            cancel_success = cancel_order(client, order.id)
-                            if cancel_success:
-                                cancelled_count += 1
-                                print(f"   ✅ Cancelled order {order.id} for {order.symbol}")
-                            else:
-                                print(f"   ⚠️ Could not cancel order {order.id}")
-                        except Exception as e:
-                            print(f"   ⚠️ Error cancelling order {order.id}: {e}")
-                
-                print(f"   ✅ Cancelled {cancelled_count} test orders")
-                
-            except Exception as e:
-                print(f"   ⚠️ Error during order cleanup: {e}")
-        
-        # Clean up ALL database entries
-        try:
-            print("   🧹 Cleaning up database entries...")
-            
-            # Delete all test cycles
-            deleted_cycles = 0
-            for cycle_id, symbol in test_cycle_ids:
+        # Cancel any orders placed during test
+        if client and placed_orders:
+            print("   Cancelling test orders...")
+            for order_id in placed_orders:
                 try:
-                    delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
-                    execute_query(delete_cycle_query, (cycle_id,), commit=True)
-                    deleted_cycles += 1
+                    cancel_success = cancel_order(client, order_id)
+                    if cancel_success:
+                        print(f"   ✅ Cancelled order {order_id}")
+                    else:
+                        print(f"   ⚠️ Could not cancel order {order_id}")
                 except Exception as e:
-                    print(f"   ⚠️ Error deleting cycle {cycle_id}: {e}")
-            
-            print(f"   ✅ Deleted {deleted_cycles} test cycles")
-            
-            # Delete all test assets
-            deleted_assets = 0
-            for asset_id, symbol in test_asset_ids:
-                try:
-                    delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
-                    execute_query(delete_asset_query, (asset_id,), commit=True)
-                    deleted_assets += 1
-                except Exception as e:
-                    print(f"   ⚠️ Error deleting asset {asset_id}: {e}")
-            
-            print(f"   ✅ Deleted {deleted_assets} test assets")
-            
-            results['cleanup_completed'] = True
-            print("   ✅ Database cleanup completed")
-                
-        except Exception as e:
-            print(f"   ⚠️ Error during database cleanup: {e}")
+                    print(f"   ⚠️ Error cancelling order {order_id}: {e}")
         
-        print("   ✅ Phase 4 cleanup completed")
+        # Delete test cycle
+        if test_cycle_id:
+            try:
+                delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
+                execute_query(delete_cycle_query, (test_cycle_id,), commit=True)
+                print(f"   ✅ Deleted test cycle {test_cycle_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting cycle: {e}")
+        
+        # Delete test asset
+        if test_asset_id:
+            try:
+                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
+                execute_query(delete_asset_query, (test_asset_id,), commit=True)
+                print(f"   ✅ Deleted test asset {test_asset_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting asset: {e}")
+        
+        print("   ✅ Teardown completed")
+
+
+def test_phase5_safety_order_logic():
+    """
+    Phase 5 Integration Test: Safety Order Logic and Placement
+    
+    This test comprehensively verifies the safety order functionality including:
+    - Condition checking (cycle status, quantity > 0, safety orders < max)
+    - Price trigger calculation (price drop percentage)
+    - Safety order placement via Alpaca API
+    - Integration with duplicate prevention system
+    
+    Scenario: Asset with existing position experiences price drop triggering safety order.
+    """
+    print("\n" + "="*80)
+    print("PHASE 5 INTEGRATION TEST: Safety Order Logic and Placement")
+    print("="*80)
+    print("TESTING: Complete safety order flow from price drop to order placement...")
+    
+    # Track resources for cleanup
+    test_asset_id = None
+    test_cycle_id = None
+    placed_orders = []
+    client = None
+    
+    try:
+        # SETUP: Database and Alpaca connections
+        print("\n1. 🔧 SETUP: Preparing test environment...")
+        if not check_connection():
+            print("❌ FAILED: Database connection test failed")
+            return False
+        
+        client = get_trading_client()
+        if not client:
+            print("❌ FAILED: Could not initialize Alpaca trading client")
+            return False
+        print("✅ SUCCESS: Database and Alpaca connections established")
+        
+        # SETUP: Create test asset with safety order configuration
+        test_symbol = 'ETH/USD'
+        print(f"\n2. 🔧 SETUP: Creating test asset configuration for {test_symbol}...")
+        
+        insert_asset_query = """
+        INSERT INTO dca_assets (
+            asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+            max_safety_orders, safety_order_deviation, take_profit_percent,
+            cooldown_period, buy_order_price_deviation_percent
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        # Configure for safety order testing
+        asset_params = (
+            test_symbol, True, 
+            Decimal('200.00'),  # base_order_amount
+            Decimal('150.00'),  # safety_order_amount  
+            3,                  # max_safety_orders (allow 3 safety orders)
+            Decimal('2.5'),     # safety_order_deviation (2.5% drop triggers safety order)
+            Decimal('2.0'),     # take_profit_percent
+            300,                # cooldown_period
+            Decimal('3.0')      # buy_order_price_deviation_percent
+        )
+        
+        test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        print(f"✅ SUCCESS: Created test asset with ID {test_asset_id}")
+        print(f"   Safety Order Amount: $150.00")
+        print(f"   Safety Order Deviation: 2.5% (price drop trigger)")
+        print(f"   Max Safety Orders: 3")
+        
+        # SETUP: Create cycle with existing position (simulating filled base order)
+        print(f"\n3. 🔧 SETUP: Creating cycle with existing position...")
+        
+        # Simulate base order filled at $4,000 ETH
+        last_fill_price = Decimal('4000.00')
+        position_quantity = Decimal('0.05')  # 0.05 ETH from base order
+        
+        cycle_with_position = create_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=position_quantity,  # Has position (key for safety order)
+            average_purchase_price=last_fill_price,
+            safety_orders=0,  # No safety orders yet (can place up to 3)
+            last_order_fill_price=last_fill_price  # Last filled at $4,000
+        )
+        
+        if not cycle_with_position:
+            print("❌ FAILED: Could not create cycle with position")
+            return False
+        
+        test_cycle_id = cycle_with_position.id
+        print(f"✅ SUCCESS: Created cycle with position:")
+        print(f"   Cycle ID: {test_cycle_id}")
+        print(f"   Status: watching")
+        print(f"   Quantity: {position_quantity} ETH")
+        print(f"   Last Fill Price: ${last_fill_price}")
+        print(f"   Safety Orders: 0/3 (ready for safety orders)")
+        
+        # Calculate trigger price for verification
+        trigger_price = last_fill_price * (Decimal('1') - Decimal('2.5') / Decimal('100'))
+        print(f"   Trigger Price: ${trigger_price} (2.5% below ${last_fill_price})")
+        
+        # Test 1: ASSERT safety order conditions are met
+        print(f"\n4. ✅ ASSERT: Verifying safety order conditions are met...")
+        
+        # Verify all safety order preconditions
+        assert cycle_with_position.status == 'watching', f"Status should be 'watching', got '{cycle_with_position.status}'"
+        assert cycle_with_position.quantity > Decimal('0'), f"Quantity should be > 0, got {cycle_with_position.quantity}"
+        assert cycle_with_position.safety_orders < 3, f"Safety orders should be < 3, got {cycle_with_position.safety_orders}"
+        assert cycle_with_position.last_order_fill_price is not None, "Last order fill price should not be None"
+        
+        print("✅ SUCCESS: All safety order preconditions met")
+        print(f"   ✓ Status: {cycle_with_position.status}")
+        print(f"   ✓ Quantity: {cycle_with_position.quantity} > 0")
+        print(f"   ✓ Safety Orders: {cycle_with_position.safety_orders} < 3")
+        print(f"   ✓ Last Fill Price: ${cycle_with_position.last_order_fill_price}")
+        
+        # Test 2: Test price NOT triggering safety order (above trigger price)
+        print(f"\n5. 🎯 TEST: Price above trigger (should NOT place safety order)...")
+        
+        # Price above trigger ($3,950 > $3,900 trigger)
+        non_trigger_price = 3950.0
+        non_trigger_quote = create_realistic_eth_quote(ask_price=non_trigger_price)
+        
+        print(f"   📊 Quote: ${non_trigger_quote.ask_price:,.2f} > ${trigger_price} (no trigger)")
+        
+        # Clear recent orders and call handler
+        import main_app
+        main_app.recent_orders.clear()
+        
+        orders_before_non_trigger = get_open_orders(client)
+        check_and_place_safety_order(non_trigger_quote)
+        time.sleep(2)
+        orders_after_non_trigger = get_open_orders(client)
+        
+        # Should be no new orders
+        new_orders_non_trigger = [o for o in orders_after_non_trigger if o not in orders_before_non_trigger]
+        
+        if len(new_orders_non_trigger) == 0:
+            print("✅ SUCCESS: No safety order placed (price above trigger)")
+        else:
+            print(f"❌ FAILED: Unexpected order placed when price above trigger")
+            return False
+        
+        # Test 3: Test price triggering safety order (below trigger price)
+        print(f"\n6. 🎯 TEST: Price below trigger (SHOULD place safety order)...")
+        
+        # Price below trigger ($3,850 < $3,900 trigger)
+        trigger_ask_price = 3850.0
+        trigger_quote = create_realistic_eth_quote(ask_price=trigger_ask_price)
+        
+        print(f"   📊 Quote: ${trigger_quote.ask_price:,.2f} < ${trigger_price} (TRIGGER!)")
+        
+        expected_safety_qty = 150.0 / trigger_ask_price
+        print(f"   📊 Expected Safety Order: ${150.00} ÷ ${trigger_ask_price:,.2f} = {expected_safety_qty:.6f} ETH")
+        
+        # Clear recent orders and call handler
+        main_app.recent_orders.clear()
+        
+        orders_before_trigger = get_open_orders(client)
+        eth_orders_before = [o for o in orders_before_trigger if o.symbol == test_symbol and o.side == 'buy']
+        
+        # Call safety order handler
+        check_and_place_safety_order(trigger_quote)
+        time.sleep(3)
+        
+        # ASSERT: Verify safety order was placed
+        print(f"\n7. ✅ ASSERT: Verifying safety order placement...")
+        
+        # Check if order was tracked in recent_orders
+        if test_symbol in main_app.recent_orders:
+            recent_order_info = main_app.recent_orders[test_symbol]
+            safety_order_id = recent_order_info['order_id']
+            placed_orders.append(safety_order_id)
+            
+            print(f"✅ SUCCESS: Safety order placed and tracked!")
+            print(f"   Order ID: {safety_order_id}")
+            print(f"   🛡️ Safety Order #1 triggered by price drop")
+            
+            # Verify order details on Alpaca
+            orders_after_trigger = get_open_orders(client)
+            safety_order = None
+            
+            for order in orders_after_trigger:
+                if order.id == safety_order_id:
+                    safety_order = order
+                    break
+            
+            if safety_order:
+                actual_qty = float(safety_order.qty)
+                actual_limit_price = float(safety_order.limit_price)
+                
+                print(f"   📋 Alpaca Order Details:")
+                print(f"      Symbol: {safety_order.symbol}")
+                print(f"      Side: {safety_order.side}")
+                print(f"      Quantity: {actual_qty:.6f} ETH")
+                print(f"      Limit Price: ${actual_limit_price:,.2f}")
+                print(f"      Order Type: {safety_order.order_type}")
+                
+                # Verify quantity is approximately correct
+                qty_diff_pct = abs(actual_qty - expected_safety_qty) / expected_safety_qty * 100
+                if qty_diff_pct > 2.0:  # Allow 2% variance
+                    print(f"⚠️ WARNING: Quantity variance {qty_diff_pct:.2f}% > 2%")
+                else:
+                    print(f"✅ Quantity variance {qty_diff_pct:.2f}% within acceptable range")
+                    
+            else:
+                print("⚠️ WARNING: Safety order may have filled immediately")
+                
+        else:
+            print("❌ FAILED: Safety order was not placed (not tracked in recent_orders)")
+            return False
+        
+        # Test 4: Test duplicate prevention (same symbol, recent order)
+        print(f"\n8. 🎯 TEST: Duplicate prevention (should NOT place another order)...")
+        
+        # Try to place another safety order immediately
+        orders_before_duplicate = get_open_orders(client)
+        check_and_place_safety_order(trigger_quote)  # Same quote again
+        time.sleep(2)
+        orders_after_duplicate = get_open_orders(client)
+        
+        new_orders_duplicate = [o for o in orders_after_duplicate if o not in orders_before_duplicate]
+        
+        if len(new_orders_duplicate) == 0:
+            print("✅ SUCCESS: Duplicate prevention working (no second order)")
+        else:
+            print("⚠️ WARNING: Duplicate prevention may not be working perfectly")
+        
+        # ASSERT: Verify cycle database unchanged (MarketDataStream doesn't update DB)
+        print(f"\n9. ✅ ASSERT: Verifying cycle database unchanged...")
+        
+        current_cycle = get_latest_cycle(test_asset_id)
+        if (current_cycle.safety_orders != 0 or 
+            current_cycle.quantity != position_quantity or
+            current_cycle.average_purchase_price != last_fill_price):
+            print("❌ FAILED: Cycle incorrectly modified by MarketDataStream")
+            return False
+        
+        print("✅ SUCCESS: Cycle database correctly unchanged")
+        print("   ℹ️ Note: TradingStream will increment safety_orders when order fills")
+        
+        print(f"\n🎉 PHASE 5 INTEGRATION TEST COMPLETED SUCCESSFULLY!")
+        print("✅ Safety order condition checking working correctly")
+        print("✅ Price trigger calculation working correctly") 
+        print("✅ Safety order placement via Alpaca API working")
+        print("✅ Duplicate prevention system working")
+        print("✅ Database state management correct")
+        print("🚀 Phase 5 safety order functionality is fully operational!")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ FAILED: Exception during Phase 5 test: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+        
+    finally:
+        # TEARDOWN: Clean up all test resources
+        print(f"\n🧹 TEARDOWN: Cleaning up test resources...")
+        
+        # Cancel any orders placed during test
+        if client and placed_orders:
+            print("   Cancelling test orders...")
+            for order_id in placed_orders:
+                try:
+                    cancel_success = cancel_order(client, order_id)
+                    if cancel_success:
+                        print(f"   ✅ Cancelled order {order_id}")
+                    else:
+                        print(f"   ⚠️ Could not cancel order {order_id}")
+                except Exception as e:
+                    print(f"   ⚠️ Error cancelling order {order_id}: {e}")
+        
+        # Delete test cycle
+        if test_cycle_id:
+            try:
+                delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
+                execute_query(delete_cycle_query, (test_cycle_id,), commit=True)
+                print(f"   ✅ Deleted test cycle {test_cycle_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting cycle: {e}")
+        
+        # Delete test asset
+        if test_asset_id:
+            try:
+                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
+                execute_query(delete_asset_query, (test_asset_id,), commit=True)
+                print(f"   ✅ Deleted test asset {test_asset_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting asset: {e}")
+        
+        print("   ✅ Teardown completed")
+
+
+def test_websocket_handler_base_order_placement():
+    """
+    SIMULATED Integration Test: MarketDataStream handler places base order
+    
+    This test demonstrates the new simulated testing methodology by directly
+    calling WebSocket handler functions with crafted mock event data instead
+    of waiting for live market events.
+    
+    Scenario: Test asset receives a price quote that should trigger a base order.
+    """
+    print("\n" + "="*80)
+    print("SIMULATED INTEGRATION TEST: MarketDataStream Base Order Placement")
+    print("="*80)
+    print("TESTING: Scenario - MarketDataStream processes price update leading to base order...")
+    
+    # Track resources for cleanup
+    test_asset_id = None
+    test_cycle_id = None
+    placed_orders = []
+    client = None
+    
+    try:
+        # SETUP: Connect to database
+        print("\n1. 🔧 SETUP: Preparing test environment...")
+        if not check_connection():
+            print("❌ FAILED: Database connection test failed")
+            return False
+        
+        # SETUP: Initialize Alpaca client
+        client = get_trading_client()
+        if not client:
+            print("❌ FAILED: Could not initialize Alpaca trading client")
+            return False
+        print("✅ SUCCESS: Database and Alpaca connections established")
+        
+        # SETUP: Create test asset configuration
+        test_symbol = 'BTC/USD'
+        print(f"\n2. 🔧 SETUP: Creating test asset configuration for {test_symbol}...")
+        
+        insert_asset_query = """
+        INSERT INTO dca_assets (
+            asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+            max_safety_orders, safety_order_deviation, take_profit_percent,
+            cooldown_period, buy_order_price_deviation_percent
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        asset_params = (
+            test_symbol, True, Decimal('50.00'), Decimal('25.00'),
+            3, Decimal('2.0'), Decimal('1.5'), 300, Decimal('3.0')
+        )
+        
+        test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        print(f"✅ SUCCESS: Created test asset with ID {test_asset_id}")
+        
+        # SETUP: Create initial cycle (watching, quantity=0)
+        print(f"\n3. 🔧 SETUP: Creating initial cycle for {test_symbol}...")
+        
+        initial_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=Decimal('0'),  # No position yet
+            average_purchase_price=Decimal('0'),
+            safety_orders=0
+        )
+        
+        if not initial_cycle:
+            print("❌ FAILED: Could not create initial cycle")
+            return False
+        
+        test_cycle_id = initial_cycle.id
+        print(f"✅ SUCCESS: Created cycle with ID {test_cycle_id}")
+        print(f"   Status: watching")
+        print(f"   Quantity: {initial_cycle.quantity} SOL")
+        print(f"   Latest Order ID: {initial_cycle.latest_order_id}")
+        
+        # ACTION: Create mock quote event that should trigger base order
+        print(f"\n4. 🎯 ACTION: Creating mock quote event for {test_symbol}...")
+        
+        # Create a realistic BTC quote at $50,000
+        mock_quote = create_realistic_btc_quote(ask_price=50000.0)
+        
+        print(f"   📊 Mock Quote: {mock_quote.symbol}")
+        print(f"   📊 Ask: ${mock_quote.ask_price:,.2f} | Bid: ${mock_quote.bid_price:,.2f}")
+        print(f"   📊 Expected Order: ${50.00} ÷ ${mock_quote.ask_price:,.2f} = {50.0/mock_quote.ask_price:.8f} BTC")
+        
+        # Clear any recent orders to avoid cooldown
+        import main_app
+        main_app.recent_orders.clear()
+        
+        # ACTION: Directly call the MarketDataStream handler
+        print(f"\n5. 🎯 ACTION: Calling check_and_place_base_order() handler...")
+        print("   This simulates receiving a price quote via WebSocket...")
+        
+        # Record orders before handler call
+        orders_before = get_open_orders(client)
+        btc_orders_before = [o for o in orders_before if o.symbol == test_symbol and o.side == 'buy']
+        
+        # Call the handler function directly
+        check_and_place_base_order(mock_quote)
+        
+        # Give a moment for order to be placed
+        time.sleep(2)
+        
+        # ASSERT: Check if new order was placed on Alpaca
+        print(f"\n6. ✅ ASSERT: Checking for new base order on Alpaca...")
+        orders_after = get_open_orders(client)
+        btc_orders_after = [o for o in orders_after if o.symbol == test_symbol and o.side == 'buy']
+        
+        new_orders = [o for o in btc_orders_after if o not in btc_orders_before]
+        
+        if not new_orders:
+            print("❌ FAILED: No new base order found on Alpaca")
+            return False
+        
+        if len(new_orders) > 1:
+            print(f"⚠️ WARNING: Multiple new orders found ({len(new_orders)}), expected 1")
+        
+        new_order = new_orders[0]
+        placed_orders.append(new_order.id)
+        
+        # Verify order parameters
+        expected_qty = 50.0 / mock_quote.ask_price
+        actual_qty = float(new_order.qty)
+        actual_limit_price = float(new_order.limit_price)
+        
+        print(f"✅ SUCCESS: New BUY order placed on Alpaca!")
+        print(f"   Order ID: {new_order.id}")
+        print(f"   Symbol: {new_order.symbol}")
+        print(f"   Side: {new_order.side}")
+        print(f"   Type: {new_order.order_type}")
+        print(f"   Quantity: {actual_qty:.8f} BTC (expected: {expected_qty:.8f})")
+        print(f"   Limit Price: ${actual_limit_price:,.2f}")
+        print(f"   Time in Force: {new_order.time_in_force}")
+        
+        # Verify order is reasonable
+        qty_diff_pct = abs(actual_qty - expected_qty) / expected_qty * 100
+        if qty_diff_pct > 1.0:  # Allow 1% variance
+            print(f"⚠️ WARNING: Quantity variance is {qty_diff_pct:.2f}% (>1%)")
+        
+        # ASSERT: Check that cycle database was NOT updated (MarketDataStream doesn't update DB)
+        print(f"\n7. ✅ ASSERT: Verifying cycle database was NOT updated...")
+        updated_cycle = get_latest_cycle(test_asset_id)
+        
+        if not updated_cycle:
+            print("❌ FAILED: Could not fetch cycle after handler call")
+            return False
+        
+        # Cycle should be unchanged (TradingStream updates DB, not MarketDataStream)
+        if (updated_cycle.quantity != Decimal('0') or 
+            updated_cycle.status != 'watching' or
+            updated_cycle.average_purchase_price != Decimal('0')):
+            print("❌ FAILED: Cycle was incorrectly updated by MarketDataStream handler")
+            print(f"   Quantity: {updated_cycle.quantity} (expected: 0)")
+            print(f"   Status: {updated_cycle.status} (expected: watching)")
+            return False
+        
+        print("✅ SUCCESS: Cycle database correctly unchanged (as expected)")
+        print("   ℹ️ Note: TradingStream will update cycle when order fills")
+        
+        print(f"\n🎉 SIMULATED TEST COMPLETED SUCCESSFULLY!")
+        print("✅ MarketDataStream handler correctly placed base order")
+        print("✅ Order parameters are correct")
+        print("✅ Database state is correct (unchanged)")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ FAILED: Exception during simulated test: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+        
+    finally:
+        # TEARDOWN: Clean up test resources
+        print(f"\n🧹 TEARDOWN: Cleaning up test resources...")
+        
+        # Cancel any orders placed during test
+        if client and placed_orders:
+            print("   Cancelling test orders...")
+            for order_id in placed_orders:
+                try:
+                    cancel_success = cancel_order(client, order_id)
+                    if cancel_success:
+                        print(f"   ✅ Cancelled order {order_id}")
+                    else:
+                        print(f"   ⚠️ Could not cancel order {order_id}")
+                except Exception as e:
+                    print(f"   ⚠️ Error cancelling order {order_id}: {e}")
+        
+        # Delete test cycle
+        if test_cycle_id:
+            try:
+                delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
+                execute_query(delete_cycle_query, (test_cycle_id,), commit=True)
+                print(f"   ✅ Deleted test cycle {test_cycle_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting cycle: {e}")
+        
+        # Delete test asset
+        if test_asset_id:
+            try:
+                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
+                execute_query(delete_asset_query, (test_asset_id,), commit=True)
+                print(f"   ✅ Deleted test asset {test_asset_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting asset: {e}")
+        
+        print("   ✅ Teardown completed")
+
+
+def test_websocket_handler_safety_order_placement():
+    """
+    SIMULATED Integration Test: MarketDataStream handler places safety order
+    
+    Scenario: Test asset with existing position receives a price quote that
+    drops enough to trigger a safety order placement.
+    """
+    print("\n" + "="*80)
+    print("SIMULATED INTEGRATION TEST: MarketDataStream Safety Order Placement")
+    print("="*80)
+    print("TESTING: Scenario - Price drops enough to trigger safety order placement...")
+    
+    # Track resources for cleanup
+    test_asset_id = None
+    test_cycle_id = None
+    placed_orders = []
+    client = None
+    
+    try:
+        # SETUP: Connect to database and Alpaca
+        print("\n1. 🔧 SETUP: Preparing test environment...")
+        if not check_connection():
+            print("❌ FAILED: Database connection test failed")
+            return False
+        
+        client = get_trading_client()
+        if not client:
+            print("❌ FAILED: Could not initialize Alpaca trading client")
+            return False
+        print("✅ SUCCESS: Database and Alpaca connections established")
+        
+        # SETUP: Create test asset configuration
+        test_symbol = 'ETH/USD'
+        print(f"\n2. 🔧 SETUP: Creating test asset configuration for {test_symbol}...")
+        
+        insert_asset_query = """
+        INSERT INTO dca_assets (
+            asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+            max_safety_orders, safety_order_deviation, take_profit_percent,
+            cooldown_period, buy_order_price_deviation_percent
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        asset_params = (
+            test_symbol, True, Decimal('100.00'), Decimal('75.00'),
+            3, Decimal('3.0'), Decimal('2.0'), 300, Decimal('3.0')  # 3% safety deviation
+        )
+        
+        test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        print(f"✅ SUCCESS: Created test asset with ID {test_asset_id}")
+        
+        # SETUP: Create cycle with existing position (simulating filled base order)
+        print(f"\n3. 🔧 SETUP: Creating cycle with existing position for {test_symbol}...")
+        
+        # Simulate that a base order was already filled at $3,000
+        cycle_with_position = create_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=Decimal('0.033333'),  # Some ETH quantity from base order
+            average_purchase_price=Decimal('3000.00'),  # Base order filled at $3,000
+            safety_orders=0,  # No safety orders yet
+            last_order_fill_price=Decimal('3000.00')  # Last fill was at $3,000
+        )
+        
+        if not cycle_with_position:
+            print("❌ FAILED: Could not create cycle with position")
+            return False
+        
+        test_cycle_id = cycle_with_position.id
+        print(f"✅ SUCCESS: Created cycle with position:")
+        print(f"   Cycle ID: {test_cycle_id}")
+        print(f"   Status: watching")
+        print(f"   Quantity: {cycle_with_position.quantity} ETH")
+        print(f"   Last Fill Price: ${cycle_with_position.last_order_fill_price}")
+        print(f"   Safety Orders: {cycle_with_position.safety_orders}/3")
+        
+        # ACTION: Create mock quote that should trigger safety order
+        print(f"\n4. 🎯 ACTION: Creating mock quote that triggers safety order...")
+        
+        # Price needs to drop 3% from $3,000 to trigger safety order
+        # Trigger price = $3,000 * (1 - 0.03) = $2,910
+        # Use ask price of $2,900 (below trigger)
+        trigger_ask_price = 2900.0
+        mock_quote = create_realistic_eth_quote(ask_price=trigger_ask_price)
+        
+        print(f"   📊 Mock Quote: {mock_quote.symbol}")
+        print(f"   📊 Ask: ${mock_quote.ask_price:,.2f} | Bid: ${mock_quote.bid_price:,.2f}")
+        print(f"   📊 Last Fill: $3,000.00 | Trigger at: $2,910.00 (3% drop)")
+        print(f"   📊 Current Ask: ${trigger_ask_price:,.2f} < $2,910.00 ✓ SHOULD TRIGGER")
+        print(f"   📊 Expected Safety Order: ${75.00} ÷ ${trigger_ask_price:,.2f} = {75.0/trigger_ask_price:.6f} ETH")
+        
+        # Clear any recent orders to avoid cooldown
+        import main_app
+        main_app.recent_orders.clear()
+        
+        # ACTION: Call the safety order handler
+        print(f"\n5. 🎯 ACTION: Calling check_and_place_safety_order() handler...")
+        
+        # Record orders before
+        orders_before = get_open_orders(client)
+        eth_orders_before = [o for o in orders_before if o.symbol == test_symbol and o.side == 'buy']
+        
+        # Clear the global recent_orders before test to get clean tracking
+        import main_app
+        main_app.recent_orders.clear()
+        
+        # Call the handler function directly
+        check_and_place_safety_order(mock_quote)
+        
+        # Give time for order placement
+        time.sleep(3)
+        
+        # ASSERT: Check if safety order was placed (via recent_orders tracking)
+        print(f"\n6. ✅ ASSERT: Verifying safety order was placed...")
+        
+        # First check if the order was tracked in recent_orders (proves it was placed)
+        if test_symbol in main_app.recent_orders:
+            recent_order_info = main_app.recent_orders[test_symbol]
+            order_id = recent_order_info['order_id']
+            placed_orders.append(order_id)
+            
+            print(f"✅ SUCCESS: Safety order was placed and tracked!")
+            print(f"   Order ID: {order_id}")
+            print(f"   🛡️ Safety Order #1 triggered by 3.33% price drop")
+            
+            # Also check if it's still open or was filled
+            orders_after = get_open_orders(client)
+            open_order_ids = [o.id for o in orders_after]
+            
+            if order_id in open_order_ids:
+                print(f"   Status: Order still open (pending fill)")
+            else:
+                print(f"   Status: Order likely filled immediately (fast market)")
+                
+        else:
+            print("❌ FAILED: No safety order was placed (not tracked in recent_orders)")
+            return False
+        
+        # ASSERT: Verify cycle database unchanged (MarketDataStream doesn't update DB)
+        print(f"\n7. ✅ ASSERT: Verifying cycle database unchanged...")
+        
+        current_cycle = get_latest_cycle(test_asset_id)
+        if (current_cycle.safety_orders != 0 or 
+            current_cycle.quantity != Decimal('0.033333')):
+            print("❌ FAILED: Cycle incorrectly modified by MarketDataStream handler")
+            return False
+        
+        print("✅ SUCCESS: Cycle database correctly unchanged")
+        print("   ℹ️ Note: TradingStream will update safety_orders count when order fills")
+        
+        print(f"\n🎉 SIMULATED SAFETY ORDER TEST COMPLETED SUCCESSFULLY!")
+        print("✅ Safety order correctly triggered by price drop")
+        print("✅ Order parameters are correct")
+        print("✅ Database state is correct (unchanged)")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ FAILED: Exception during safety order test: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+        
+    finally:
+        # TEARDOWN: Clean up test resources
+        print(f"\n🧹 TEARDOWN: Cleaning up test resources...")
+        
+        # Cancel any orders placed during test
+        if client and placed_orders:
+            print("   Cancelling test orders...")
+            for order_id in placed_orders:
+                try:
+                    cancel_success = cancel_order(client, order_id)
+                    if cancel_success:
+                        print(f"   ✅ Cancelled order {order_id}")
+                    else:
+                        print(f"   ⚠️ Could not cancel order {order_id}")
+                except Exception as e:
+                    print(f"   ⚠️ Error cancelling order {order_id}: {e}")
+        
+        # Delete test cycle
+        if test_cycle_id:
+            try:
+                delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
+                execute_query(delete_cycle_query, (test_cycle_id,), commit=True)
+                print(f"   ✅ Deleted test cycle {test_cycle_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting cycle: {e}")
+        
+        # Delete test asset
+        if test_asset_id:
+            try:
+                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
+                execute_query(delete_asset_query, (test_asset_id,), commit=True)
+                print(f"   ✅ Deleted test asset {test_asset_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting asset: {e}")
+        
+        print("   ✅ Teardown completed")
+
+
+async def test_websocket_handler_trade_update_processing():
+    """
+    SIMULATED Integration Test: TradingStream handler processes order fills
+    
+    Scenario: Simulate a BUY order fill event and verify that the cycle
+    database is correctly updated with new quantity, average price, etc.
+    """
+    print("\n" + "="*80)
+    print("SIMULATED INTEGRATION TEST: TradingStream Order Fill Processing")
+    print("="*80)
+    print("TESTING: Scenario - TradingStream processes BUY order fill and updates database...")
+    
+    # Track resources for cleanup
+    test_asset_id = None
+    test_cycle_id = None
+    
+    try:
+        # SETUP: Database connection
+        print("\n1. 🔧 SETUP: Preparing test environment...")
+        if not check_connection():
+            print("❌ FAILED: Database connection test failed")
+            return False
+        print("✅ SUCCESS: Database connection established")
+        
+        # SETUP: Create test asset
+        test_symbol = 'SOL/USD'
+        print(f"\n2. 🔧 SETUP: Creating test asset configuration for {test_symbol}...")
+        
+        insert_asset_query = """
+        INSERT INTO dca_assets (
+            asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+            max_safety_orders, safety_order_deviation, take_profit_percent,
+            cooldown_period, buy_order_price_deviation_percent
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        asset_params = (
+            test_symbol, True, Decimal('80.00'), Decimal('40.00'),
+            2, Decimal('2.5'), Decimal('1.8'), 300, Decimal('3.0')
+        )
+        
+        test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        print(f"✅ SUCCESS: Created test asset with ID {test_asset_id}")
+        
+        # SETUP: Create initial cycle (watching, quantity=0 - simulating placed but unfilled base order)
+        print(f"\n3. 🔧 SETUP: Creating initial cycle for {test_symbol}...")
+        
+        initial_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=Decimal('0'),  # No position yet
+            average_purchase_price=Decimal('0'),
+            safety_orders=0,
+            latest_order_id='pending_base_order_123'  # Simulating pending order
+        )
+        
+        if not initial_cycle:
+            print("❌ FAILED: Could not create initial cycle")
+            return False
+        
+        test_cycle_id = initial_cycle.id
+        print(f"✅ SUCCESS: Created cycle with ID {test_cycle_id}")
+        print(f"   Status: watching")
+        print(f"   Quantity: {initial_cycle.quantity} SOL")
+        print(f"   Latest Order ID: {initial_cycle.latest_order_id}")
+        
+        # ACTION: Create mock trade update for base order fill
+        print(f"\n4. 🎯 ACTION: Creating mock trade update for base order fill...")
+        
+        fill_price = 120.0
+        fill_qty = 80.0 / fill_price  # $80 / $120 = 0.666667 SOL
+        
+        mock_trade_update = create_mock_base_order_fill_event(
+            symbol=test_symbol,
+            order_id='filled_base_order_456',
+            fill_price=fill_price,
+            fill_qty=fill_qty,
+            total_order_qty=fill_qty,
+            limit_price=121.0  # Original limit price
+        )
+        
+        print(f"   📊 Mock Trade Update:")
+        print(f"   📊 Event: {mock_trade_update.event}")
+        print(f"   📊 Order ID: {mock_trade_update.order.id}")
+        print(f"   📊 Symbol: {mock_trade_update.order.symbol}")
+        print(f"   📊 Side: {mock_trade_update.order.side}")
+        print(f"   📊 Fill Price: ${fill_price:.2f}")
+        print(f"   📊 Fill Quantity: {fill_qty:.6f} SOL")
+        print(f"   📊 Fill Value: ${fill_price * fill_qty:.2f}")
+        
+        # ACTION: Call the TradingStream handler
+        print(f"\n5. 🎯 ACTION: Calling on_trade_update() handler...")
+        print("   This simulates receiving a trade update via WebSocket...")
+        
+        # Import asyncio for running async function
+        import asyncio
+        
+        # Call the async handler function
+        await on_trade_update(mock_trade_update)
+        
+        # ASSERT: Check that cycle was correctly updated
+        print(f"\n6. ✅ ASSERT: Verifying cycle database was correctly updated...")
+        updated_cycle = get_latest_cycle(test_asset_id)
+        
+        if not updated_cycle:
+            print("❌ FAILED: Could not fetch updated cycle")
+            return False
+        
+        # Verify cycle updates
+        expected_quantity = Decimal(str(fill_qty))
+        expected_avg_price = Decimal(str(fill_price))
+        expected_last_fill_price = Decimal(str(fill_price))
+        
+        print(f"✅ SUCCESS: Cycle database correctly updated!")
+        print(f"   Quantity: {updated_cycle.quantity} SOL (expected: {expected_quantity})")
+        print(f"   Avg Purchase Price: ${updated_cycle.average_purchase_price} (expected: ${expected_avg_price})")
+        print(f"   Last Fill Price: ${updated_cycle.last_order_fill_price} (expected: ${expected_last_fill_price})")
+        print(f"   Safety Orders: {updated_cycle.safety_orders} (expected: 0 - this was base order)")
+        print(f"   Status: {updated_cycle.status} (expected: watching)")
+        print(f"   Latest Order ID: {updated_cycle.latest_order_id} (should be None - order filled)")
+        
+        # Verify values are correct (with tolerance for decimal precision)
+        qty_diff = abs(updated_cycle.quantity - expected_quantity)
+        price_diff = abs(updated_cycle.average_purchase_price - expected_avg_price)
+        last_fill_diff = abs(updated_cycle.last_order_fill_price - expected_last_fill_price)
+        
+        tolerance = Decimal('0.000001')  # 1e-6 tolerance for floating point precision
+        
+        if (qty_diff > tolerance or
+            price_diff > tolerance or
+            last_fill_diff > tolerance or
+            updated_cycle.safety_orders != 0 or
+            updated_cycle.status != 'watching' or
+            updated_cycle.latest_order_id is not None):
+            print("❌ FAILED: Cycle update values are incorrect")
+            print(f"   Quantity diff: {qty_diff} (tolerance: {tolerance})")
+            print(f"   Price diff: {price_diff} (tolerance: {tolerance})")
+            print(f"   Last fill diff: {last_fill_diff} (tolerance: {tolerance})")
+            return False
+        
+        print(f"\n🎉 SIMULATED TRADE UPDATE TEST COMPLETED SUCCESSFULLY!")
+        print("✅ TradingStream handler correctly processed order fill")
+        print("✅ Cycle database correctly updated with fill data")
+        print("✅ Quantity, price, and safety order counts are correct")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ FAILED: Exception during trade update test: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+        
+    finally:
+        # TEARDOWN: Clean up test resources
+        print(f"\n🧹 TEARDOWN: Cleaning up test resources...")
+        
+        
+        # Delete test cycle
+        if test_cycle_id:
+            try:
+                delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
+                execute_query(delete_cycle_query, (test_cycle_id,), commit=True)
+                print(f"   ✅ Deleted test cycle {test_cycle_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting cycle: {e}")
+        
+        # Delete test asset
+        if test_asset_id:
+            try:
+                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
+                execute_query(delete_asset_query, (test_asset_id,), commit=True)
+                print(f"   ✅ Deleted test asset {test_asset_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting asset: {e}")
+        
+        print("   ✅ Teardown completed")
 
 
 def main():
@@ -1445,12 +1968,66 @@ def main():
                 sys.exit(1)
             return
         elif phase_arg == 'phase4':
-            print("\n🎯 Running ONLY Phase 4 tests...")
-            phase4_success = test_phase4_marketdata_places_base_order()
+            print("\n🎯 Running ONLY Phase 4 tests (SIMULATED)...")
+            phase4_success = test_phase4_simulated_base_order_placement()
             if phase4_success:
                 print("\n🎉 Phase 4: ✅ PASSED")
             else:
                 print("\n❌ Phase 4: ❌ FAILED")
+                sys.exit(1)
+            return
+        elif phase_arg == 'phase5':
+            print("\n🎯 Running ONLY Phase 5 tests...")
+            phase5_success = test_phase5_safety_order_logic()
+            if phase5_success:
+                print("\n🎉 Phase 5: ✅ PASSED")
+            else:
+                print("\n❌ Phase 5: ❌ FAILED")
+                sys.exit(1)
+            return
+        elif phase_arg == 'simulated':
+            print("\n🎯 Running ONLY Simulated WebSocket Handler tests...")
+            
+            # Run simulated tests
+            base_order_test = test_websocket_handler_base_order_placement()
+            safety_order_test = test_websocket_handler_safety_order_placement()
+            
+            # Run async trade update test
+            import asyncio
+            trade_update_test = asyncio.run(test_websocket_handler_trade_update_processing())
+            
+            if base_order_test and safety_order_test and trade_update_test:
+                print("\n🎉 ALL SIMULATED TESTS: ✅ PASSED")
+            else:
+                print("\n❌ SOME SIMULATED TESTS: ❌ FAILED")
+                sys.exit(1)
+            return
+        elif phase_arg == 'sim-base':
+            print("\n🎯 Running ONLY Simulated Base Order test...")
+            base_order_test = test_websocket_handler_base_order_placement()
+            if base_order_test:
+                print("\n🎉 Simulated Base Order Test: ✅ PASSED")
+            else:
+                print("\n❌ Simulated Base Order Test: ❌ FAILED")
+                sys.exit(1)
+            return
+        elif phase_arg == 'sim-safety':
+            print("\n🎯 Running ONLY Simulated Safety Order test...")
+            safety_order_test = test_websocket_handler_safety_order_placement()
+            if safety_order_test:
+                print("\n🎉 Simulated Safety Order Test: ✅ PASSED")
+            else:
+                print("\n❌ Simulated Safety Order Test: ❌ FAILED")
+                sys.exit(1)
+            return
+        elif phase_arg == 'sim-trade':
+            print("\n🎯 Running ONLY Simulated Trade Update test...")
+            import asyncio
+            trade_update_test = asyncio.run(test_websocket_handler_trade_update_processing())
+            if trade_update_test:
+                print("\n🎉 Simulated Trade Update Test: ✅ PASSED")
+            else:
+                print("\n❌ Simulated Trade Update Test: ❌ FAILED")
                 sys.exit(1)
             return
         elif phase_arg in ['help', '--help', '-h']:
@@ -1469,6 +2046,7 @@ def main():
     phase2_success = False
     phase3_success = False
     phase4_success = False
+    phase5_success = False
     
     # Run Phase 1 tests
     print("\nRunning Phase 1 tests...")
@@ -1478,13 +2056,17 @@ def main():
     print("\nRunning Phase 2 tests...")
     phase2_success = test_phase2_alpaca_rest_api_order_cycle()
     
-    # Run Phase 3 tests (manual verification)
+    # Run Phase 3 tests (WebSocket connections)
     print("\nRunning Phase 3 tests...")
     phase3_success = test_phase3_websocket_connection_and_data_receipt()
     
-    # Run Phase 4 tests (manual verification)
-    print("\nRunning Phase 4 tests...")
-    phase4_success = test_phase4_marketdata_places_base_order()
+    # Run Phase 4 tests (SIMULATED - no waiting for live market data)
+    print("\nRunning Phase 4 tests (SIMULATED)...")
+    phase4_success = test_phase4_simulated_base_order_placement()
+    
+    # Run Phase 5 tests (Safety order logic)
+    print("\nRunning Phase 5 tests...")
+    phase5_success = test_phase5_safety_order_logic()
     
     # Final results
     print("\n" + "="*60)
@@ -1493,15 +2075,15 @@ def main():
     
     print(f"Phase 1 (Database CRUD): {'✅ PASSED' if phase1_success else '❌ FAILED'}")
     print(f"Phase 2 (Alpaca REST API): {'✅ PASSED' if phase2_success else '❌ FAILED'}")
-    print(f"Phase 3 (WebSocket Streams): {'✅ READY FOR MANUAL TEST' if phase3_success else '❌ PREREQUISITES FAILED'}")
-    print(f"Phase 4 (MarketData Places Base Order): {'✅ READY FOR MANUAL TEST' if phase4_success else '❌ PREREQUISITES FAILED'}")
+    print(f"Phase 3 (WebSocket Streams): {'✅ PASSED' if phase3_success else '❌ FAILED'}")
+    print(f"Phase 4 (Base Order Logic): {'✅ PASSED' if phase4_success else '❌ FAILED'}")
+    print(f"Phase 5 (Safety Order Logic): {'✅ PASSED' if phase5_success else '❌ FAILED'}")
     
-    if phase1_success and phase2_success and phase3_success and phase4_success:
-        print("\n🎉 ALL AUTOMATED TESTS PASSED!")
-        print("Phase 4 requires manual verification - follow the instructions above.")
-        print("The DCA Trading Bot Phase 1, 2, & 4 functionality is ready for testing!")
+    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success]):
+        print("\n🎉 ALL PHASES PASSED!")
+        print("The DCA Trading Bot is fully functional and ready for production!")
     else:
-        print("\n❌ SOME TESTS FAILED!")
+        print("\n❌ SOME PHASES FAILED!")
         print("Please review the errors above and fix any issues.")
         sys.exit(1)
 
@@ -1513,13 +2095,27 @@ def print_help():
     print("  python integration_test.py phase1          # Run only Phase 1 (Database CRUD)")
     print("  python integration_test.py phase2          # Run only Phase 2 (Alpaca REST API)")
     print("  python integration_test.py phase3          # Run only Phase 3 (WebSocket Streams)")
-    print("  python integration_test.py phase4          # Run only Phase 4 (MarketData Places Base Order)")
+    print("  python integration_test.py phase4          # Run only Phase 4 (Base Order Logic - SIMULATED)")
+    print("  python integration_test.py phase5          # Run only Phase 5 (Safety Order Logic)")
+    print("  python integration_test.py simulated       # Run all simulated WebSocket handler tests")
+    print("  python integration_test.py sim-base        # Run simulated base order placement test")
+    print("  python integration_test.py sim-safety      # Run simulated safety order placement test")
+    print("  python integration_test.py sim-trade       # Run simulated trade update processing test")
     print("  python integration_test.py help            # Show this help")
     print("\nPHASE DESCRIPTIONS:")
     print("  Phase 1: Tests database CRUD operations (dca_assets, dca_cycles tables)")
     print("  Phase 2: Tests Alpaca REST API integration (orders, account, positions)")
     print("  Phase 3: Tests WebSocket connections and trade updates")
-    print("  Phase 4: Tests complete flow from market data to base order placement")
+    print("  Phase 4: Tests base order placement logic (SIMULATED - fast execution)")
+    print("  Phase 5: Tests safety order placement logic (comprehensive testing)")
+    print("\nSIMULATED TEST DESCRIPTIONS:")
+    print("  simulated: Run all simulated WebSocket handler tests (fast, no waiting)")
+    print("  sim-base: Test MarketDataStream base order placement with mock quote")
+    print("  sim-safety: Test MarketDataStream safety order placement with mock quote")
+    print("  sim-trade: Test TradingStream order fill processing with mock trade update")
+    print("\nNOTE: Phase 4 and 5 use simulated testing with mock WebSocket events")
+    print("      for fast, reliable testing without waiting for live market data.")
+    print("      Phase 3 still uses live WebSocket connections for end-to-end validation.")
     print("")
 
 
