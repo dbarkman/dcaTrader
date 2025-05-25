@@ -21,10 +21,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scr
 from consistency_checker import (
     get_stuck_buying_cycles,
     get_watching_cycles_with_quantity,
+    get_all_watching_cycles,
     is_order_stale_or_terminal,
     process_stuck_buying_cycle,
     has_alpaca_position,
+    get_alpaca_position_by_symbol,
     process_orphaned_watching_cycle,
+    process_watching_cycle_with_position_sync,
     get_current_utc_time
 )
 
@@ -433,6 +436,238 @@ class TestConsistencyChecker(unittest.TestCase):
         now = datetime.now(timezone.utc)
         time_diff = abs((now - current_time).total_seconds())
         self.assertLess(time_diff, 5, "Should return current time within 5 seconds")
+
+    @patch('consistency_checker.execute_query')
+    def test_get_all_watching_cycles(self, mock_execute_query):
+        """Test fetching all watching cycles regardless of quantity."""
+        # Mock database response with cycles having different quantities
+        mock_execute_query.return_value = [
+            {
+                'id': 10,
+                'asset_id': 100,
+                'status': 'watching',
+                'created_at': self.old_time,
+                'updated_at': self.old_time,
+                'completed_at': None,
+                'quantity': Decimal('0.01'),  # Has quantity
+                'average_purchase_price': Decimal('50000.0'),
+                'safety_orders': 1,
+                'latest_order_id': None,
+                'last_order_fill_price': Decimal('51000.0')
+            },
+            {
+                'id': 11,
+                'asset_id': 101,
+                'status': 'watching',
+                'created_at': self.old_time,
+                'updated_at': self.old_time,
+                'completed_at': None,
+                'quantity': Decimal('0'),  # No quantity
+                'average_purchase_price': Decimal('0'),
+                'safety_orders': 0,
+                'latest_order_id': None,
+                'last_order_fill_price': None
+            }
+        ]
+        
+        cycles = get_all_watching_cycles()
+        
+        # Verify correct query was called
+        mock_execute_query.assert_called_once()
+        call_args = mock_execute_query.call_args
+        query = call_args[0][0]
+        self.assertIn("status = 'watching'", query)
+        self.assertNotIn("quantity >", query)  # Should NOT filter by quantity
+        
+        # Verify results
+        self.assertEqual(len(cycles), 2, "Should return 2 watching cycles")
+        self.assertEqual(cycles[0].id, 10, "First cycle should have ID 10")
+        self.assertEqual(cycles[1].id, 11, "Second cycle should have ID 11")
+
+    @patch('utils.alpaca_client_rest.get_positions')
+    def test_get_alpaca_position_by_symbol_found(self, mock_get_positions):
+        """Test getting Alpaca position when position exists."""
+        mock_client = Mock()
+        
+        # Mock positions response
+        mock_position1 = Mock()
+        mock_position1.symbol = 'ETH/USD'
+        mock_position1.qty = '0.5'
+        mock_position1.avg_entry_price = '3000.0'
+        
+        mock_position2 = Mock()
+        mock_position2.symbol = 'BTC/USD'
+        mock_position2.qty = '0.01'
+        mock_position2.avg_entry_price = '50000.0'
+        
+        mock_get_positions.return_value = [mock_position1, mock_position2]
+        
+        result = get_alpaca_position_by_symbol(mock_client, 'BTC/USD')
+        
+        self.assertIsNotNone(result, "Should return position when found")
+        self.assertEqual(result.symbol, 'BTC/USD', "Should return correct position")
+        self.assertEqual(result.qty, '0.01', "Should have correct quantity")
+        mock_get_positions.assert_called_once_with(mock_client)
+
+    @patch('utils.alpaca_client_rest.get_positions')
+    def test_get_alpaca_position_by_symbol_not_found(self, mock_get_positions):
+        """Test getting Alpaca position when position doesn't exist."""
+        mock_client = Mock()
+        
+        # Mock positions response with different symbols
+        mock_position = Mock()
+        mock_position.symbol = 'ETH/USD'
+        mock_position.qty = '0.5'
+        
+        mock_get_positions.return_value = [mock_position]
+        
+        result = get_alpaca_position_by_symbol(mock_client, 'BTC/USD')
+        
+        self.assertIsNone(result, "Should return None when position not found")
+        mock_get_positions.assert_called_once_with(mock_client)
+
+    @patch('utils.alpaca_client_rest.get_positions')
+    def test_get_alpaca_position_by_symbol_zero_quantity(self, mock_get_positions):
+        """Test getting Alpaca position when position has zero quantity."""
+        mock_client = Mock()
+        
+        # Mock position with zero quantity
+        mock_position = Mock()
+        mock_position.symbol = 'BTC/USD'
+        mock_position.qty = '0.0'
+        
+        mock_get_positions.return_value = [mock_position]
+        
+        result = get_alpaca_position_by_symbol(mock_client, 'BTC/USD')
+        
+        self.assertIsNone(result, "Should return None when position has zero quantity")
+
+    @patch('consistency_checker.update_cycle')
+    @patch('consistency_checker.get_asset_config_by_id')
+    @patch('consistency_checker.get_alpaca_position_by_symbol')
+    def test_process_watching_cycle_with_position_sync_sync_needed(self, mock_get_position, mock_get_asset, mock_update_cycle):
+        """Test position sync when DB and Alpaca data differ."""
+        # Create test cycle with different data than Alpaca
+        cycle = self.create_mock_cycle(10, 100, 'watching', Decimal('0.005'), None)
+        cycle.average_purchase_price = Decimal('49000.0')
+        
+        # Mock asset config
+        asset = self.create_mock_asset(100, 'BTC/USD')
+        mock_get_asset.return_value = asset
+        
+        # Mock Alpaca position with different data
+        mock_position = Mock()
+        mock_position.qty = '0.01'  # Different from cycle quantity
+        mock_position.avg_entry_price = '50000.0'  # Different from cycle avg price
+        mock_get_position.return_value = mock_position
+        
+        # Mock successful update
+        mock_update_cycle.return_value = True
+        
+        mock_client = Mock()
+        result = process_watching_cycle_with_position_sync(mock_client, cycle, self.current_time)
+        
+        # Verify sync was performed
+        self.assertTrue(result, "Should return True when sync is performed")
+        mock_get_position.assert_called_once_with(mock_client, 'BTC/USD')
+        mock_update_cycle.assert_called_once()
+        
+        # Verify update call had correct data
+        call_args = mock_update_cycle.call_args
+        updates = call_args[0][1]  # Second argument is the updates dict
+        self.assertEqual(updates['quantity'], Decimal('0.01'), "Should update quantity to Alpaca value")
+        self.assertEqual(updates['average_purchase_price'], Decimal('50000.0'), "Should update avg price to Alpaca value")
+        self.assertNotIn('last_order_fill_price', updates, "Should NOT update last_order_fill_price")
+        self.assertNotIn('safety_orders', updates, "Should NOT update safety_orders")
+
+    @patch('consistency_checker.get_asset_config_by_id')
+    @patch('consistency_checker.get_alpaca_position_by_symbol')
+    def test_process_watching_cycle_with_position_sync_already_synced(self, mock_get_position, mock_get_asset):
+        """Test position sync when DB and Alpaca data are already in sync."""
+        # Create test cycle with same data as Alpaca
+        cycle = self.create_mock_cycle(10, 100, 'watching', Decimal('0.01'), None)
+        cycle.average_purchase_price = Decimal('50000.0')
+        
+        # Mock asset config
+        asset = self.create_mock_asset(100, 'BTC/USD')
+        mock_get_asset.return_value = asset
+        
+        # Mock Alpaca position with same data
+        mock_position = Mock()
+        mock_position.qty = '0.01'  # Same as cycle quantity
+        mock_position.avg_entry_price = '50000.0'  # Same as cycle avg price
+        mock_get_position.return_value = mock_position
+        
+        mock_client = Mock()
+        result = process_watching_cycle_with_position_sync(mock_client, cycle, self.current_time)
+        
+        # Verify no sync was needed
+        self.assertFalse(result, "Should return False when no sync is needed")
+        mock_get_position.assert_called_once_with(mock_client, 'BTC/USD')
+
+    @patch('consistency_checker.create_cycle')
+    @patch('consistency_checker.update_cycle')
+    @patch('consistency_checker.get_asset_config_by_id')
+    @patch('consistency_checker.get_alpaca_position_by_symbol')
+    def test_process_watching_cycle_with_position_sync_orphaned_cycle(self, mock_get_position, mock_get_asset, mock_update_cycle, mock_create_cycle):
+        """Test handling of orphaned cycle (DB has quantity but no Alpaca position)."""
+        # Create test cycle with quantity but no Alpaca position
+        cycle = self.create_mock_cycle(10, 100, 'watching', Decimal('0.01'), None)
+        cycle.average_purchase_price = Decimal('50000.0')
+        
+        # Mock asset config
+        asset = self.create_mock_asset(100, 'BTC/USD')
+        mock_get_asset.return_value = asset
+        
+        # Mock no Alpaca position
+        mock_get_position.return_value = None
+        
+        # Mock successful updates
+        mock_update_cycle.return_value = True
+        mock_create_cycle.return_value = Mock(id=20)  # New cycle ID
+        
+        mock_client = Mock()
+        result = process_watching_cycle_with_position_sync(mock_client, cycle, self.current_time)
+        
+        # Verify orphaned cycle handling
+        self.assertTrue(result, "Should return True when orphaned cycle is processed")
+        mock_get_position.assert_called_once_with(mock_client, 'BTC/USD')
+        
+        # Verify old cycle was marked as error
+        mock_update_cycle.assert_called_once()
+        update_call_args = mock_update_cycle.call_args
+        updates = update_call_args[0][1]
+        self.assertEqual(updates['status'], 'error', "Should mark old cycle as error")
+        self.assertIsNotNone(updates['completed_at'], "Should set completed_at timestamp")
+        
+        # Verify new cycle was created
+        mock_create_cycle.assert_called_once()
+        create_call_args = mock_create_cycle.call_args[1]  # kwargs
+        self.assertEqual(create_call_args['asset_id'], 100, "Should create cycle for same asset")
+        self.assertEqual(create_call_args['status'], 'watching', "Should create watching cycle")
+        self.assertEqual(create_call_args['quantity'], Decimal('0'), "Should create cycle with zero quantity")
+
+    @patch('consistency_checker.get_asset_config_by_id')
+    @patch('consistency_checker.get_alpaca_position_by_symbol')
+    def test_process_watching_cycle_with_position_sync_consistent_zero_quantity(self, mock_get_position, mock_get_asset):
+        """Test handling of consistent state (DB has zero quantity and no Alpaca position)."""
+        # Create test cycle with zero quantity
+        cycle = self.create_mock_cycle(10, 100, 'watching', Decimal('0'), None)
+        cycle.average_purchase_price = Decimal('0')
+        
+        # Mock asset config
+        asset = self.create_mock_asset(100, 'BTC/USD')
+        mock_get_asset.return_value = asset
+        
+        # Mock no Alpaca position
+        mock_get_position.return_value = None
+        
+        mock_client = Mock()
+        result = process_watching_cycle_with_position_sync(mock_client, cycle, self.current_time)
+        
+        # Verify consistent state is recognized
+        self.assertFalse(result, "Should return False when state is already consistent")
+        mock_get_position.assert_called_once_with(mock_client, 'BTC/USD')
 
 
 if __name__ == '__main__':

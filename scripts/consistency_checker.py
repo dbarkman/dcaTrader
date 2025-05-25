@@ -24,6 +24,7 @@ import os
 import logging
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
+import decimal
 from typing import List, Optional
 
 # Add src directory to path for imports
@@ -130,6 +131,40 @@ def get_watching_cycles_with_quantity() -> List[DcaCycle]:
         
     except Exception as e:
         logger.error(f"Error fetching watching cycles with quantity: {e}")
+        return []
+
+
+def get_all_watching_cycles() -> List[DcaCycle]:
+    """
+    Get all cycles in 'watching' status (regardless of quantity).
+    
+    Returns:
+        List[DcaCycle]: List of all watching cycles
+    """
+    try:
+        query = """
+        SELECT * FROM dca_cycles 
+        WHERE status = 'watching'
+        ORDER BY asset_id, created_at
+        """
+        
+        results = execute_query(query, fetch_all=True)
+        
+        if not results:
+            logger.info("No watching cycles found")
+            return []
+        
+        # Convert results to DcaCycle objects
+        watching_cycles = []
+        for row in results:
+            cycle = DcaCycle.from_dict(row)
+            watching_cycles.append(cycle)
+        
+        logger.info(f"Found {len(watching_cycles)} watching cycles")
+        return watching_cycles
+        
+    except Exception as e:
+        logger.error(f"Error fetching watching cycles: {e}")
         return []
 
 
@@ -243,6 +278,35 @@ def process_stuck_buying_cycle(client: TradingClient, cycle: DcaCycle, current_t
         return False
 
 
+def get_alpaca_position_by_symbol(client: TradingClient, symbol: str) -> Optional:
+    """
+    Get a specific position by symbol from Alpaca.
+    
+    Args:
+        client: Initialized TradingClient
+        symbol: Asset symbol (e.g., 'BTC/USD')
+        
+    Returns:
+        Position object if found, None if no position or error
+    """
+    try:
+        # Import get_positions from alpaca_client_rest
+        from utils.alpaca_client_rest import get_positions
+        
+        positions = get_positions(client)
+        for position in positions:
+            if position.symbol == symbol and float(position.qty) != 0:
+                logger.debug(f"Found Alpaca position for {symbol}: {position.qty} @ ${position.avg_entry_price}")
+                return position
+        
+        logger.debug(f"No Alpaca position found for {symbol}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error fetching Alpaca position for {symbol}: {e}")
+        return None
+
+
 def has_alpaca_position(client: TradingClient, symbol: str) -> bool:
     """
     Check if a position exists on Alpaca for the given symbol.
@@ -274,6 +338,137 @@ def has_alpaca_position(client: TradingClient, symbol: str) -> bool:
             return False
     except Exception as e:
         logger.error(f"Error checking position for {symbol}: {e}")
+        return False
+
+
+def process_watching_cycle_with_position_sync(client: TradingClient, cycle: DcaCycle, current_time: datetime) -> bool:
+    """
+    Process a 'watching' cycle with enhanced position synchronization.
+    
+    This function handles both position synchronization and orphaned cycle detection:
+    1. If Alpaca position exists: Sync quantity and average_purchase_price if different
+    2. If no Alpaca position but DB has quantity > 0: Mark as error and create new cycle
+    3. If no Alpaca position and DB has quantity = 0: No action needed (consistent)
+    
+    Args:
+        client: Alpaca trading client
+        cycle: The watching cycle to process
+        current_time: Current UTC time
+    
+    Returns:
+        bool: True if cycle was updated/processed, False otherwise
+    """
+    try:
+        logger.info(f"Processing watching cycle {cycle.id} for asset {cycle.asset_id} (qty: {cycle.quantity})")
+        
+        # Get asset configuration
+        asset_config = get_asset_config_by_id(cycle.asset_id)
+        if not asset_config:
+            logger.error(f"Asset configuration not found for asset {cycle.asset_id}")
+            return False
+        
+        logger.info(f"Checking Alpaca position for {asset_config.asset_symbol}")
+        
+        # Get current Alpaca position
+        alpaca_position = get_alpaca_position_by_symbol(client, asset_config.asset_symbol)
+        
+        if alpaca_position:
+            # Position exists on Alpaca - check for synchronization needs
+            try:
+                alpaca_qty = Decimal(str(alpaca_position.qty))
+                alpaca_avg_price = Decimal(str(alpaca_position.avg_entry_price))
+                
+                logger.info(f"Alpaca position found: {alpaca_qty} @ ${alpaca_avg_price:.4f}")
+                logger.info(f"DB cycle data: {cycle.quantity} @ ${cycle.average_purchase_price:.4f}")
+                
+                # Check if synchronization is needed
+                qty_differs = cycle.quantity != alpaca_qty
+                price_differs = cycle.average_purchase_price != alpaca_avg_price
+                
+                if qty_differs or price_differs:
+                    logger.warning(f"POSITION SYNC NEEDED for cycle {cycle.id}:")
+                    if qty_differs:
+                        logger.warning(f"  Quantity: DB={cycle.quantity} vs Alpaca={alpaca_qty}")
+                    if price_differs:
+                        logger.warning(f"  Avg Price: DB=${cycle.average_purchase_price:.4f} vs Alpaca=${alpaca_avg_price:.4f}")
+                    
+                    if DRY_RUN:
+                        logger.info(f"[DRY RUN] Would sync cycle {cycle.id} with Alpaca position data")
+                        return True
+                    else:
+                        # Sync with Alpaca position data
+                        updates = {
+                            'quantity': alpaca_qty,
+                            'average_purchase_price': alpaca_avg_price
+                        }
+                        # Important: Do NOT update last_order_fill_price or safety_orders count
+                        
+                        success = update_cycle(cycle.id, updates)
+                        if success:
+                            logger.info(f"✅ Synced cycle {cycle.id} with Alpaca position:")
+                            logger.info(f"   Updated quantity: {cycle.quantity} → {alpaca_qty}")
+                            logger.info(f"   Updated avg price: ${cycle.average_purchase_price:.4f} → ${alpaca_avg_price:.4f}")
+                            logger.info(f"   Preserved: last_order_fill_price={cycle.last_order_fill_price}, safety_orders={cycle.safety_orders}")
+                            return True
+                        else:
+                            logger.error(f"❌ Failed to sync cycle {cycle.id} with Alpaca position")
+                            return False
+                else:
+                    logger.info(f"Cycle {cycle.id} is already in sync with Alpaca position")
+                    return False
+                    
+            except (ValueError, TypeError, decimal.InvalidOperation) as e:
+                logger.error(f"Error parsing Alpaca position data for {asset_config.asset_symbol}: {e}")
+                return False
+        
+        else:
+            # No position exists on Alpaca
+            if cycle.quantity > Decimal('0'):
+                # DB thinks there should be a position - this is an inconsistency
+                logger.warning(f"INCONSISTENCY: Cycle {cycle.id} has quantity {cycle.quantity} but no Alpaca position for {asset_config.asset_symbol}")
+                
+                if DRY_RUN:
+                    logger.info(f"[DRY RUN] Would mark cycle {cycle.id} as 'error' and create new 'watching' cycle")
+                    return True
+                else:
+                    # Mark current cycle as error
+                    error_updates = {
+                        'status': 'error',
+                        'completed_at': current_time
+                    }
+                    success1 = update_cycle(cycle.id, error_updates)
+                    
+                    if not success1:
+                        logger.error(f"❌ Failed to update cycle {cycle.id} to error status")
+                        return False
+                    
+                    logger.info(f"✅ Marked cycle {cycle.id} as 'error'")
+                    
+                    # Create new watching cycle with zero quantity
+                    new_cycle_id = create_cycle(
+                        asset_id=cycle.asset_id,
+                        status='watching',
+                        quantity=Decimal('0'),
+                        average_purchase_price=Decimal('0'),
+                        safety_orders=0,
+                        latest_order_id=None,
+                        last_order_fill_price=None
+                    )
+                    
+                    if new_cycle_id:
+                        logger.info(f"✅ Created new watching cycle {new_cycle_id} for asset {cycle.asset_id}")
+                        logger.info(f"🔄 Asset {asset_config.asset_symbol} is now ready for new orders")
+                        return True
+                    else:
+                        logger.error(f"❌ Failed to create new watching cycle for asset {cycle.asset_id}")
+                        return False
+            else:
+                # DB has quantity = 0 and no Alpaca position - this is consistent
+                logger.info(f"Cycle {cycle.id} is consistent: no position on Alpaca and quantity=0 in DB")
+                return False
+        
+    except Exception as e:
+        logger.error(f"Error processing watching cycle {cycle.id}: {e}")
         return False
 
 
@@ -392,18 +587,18 @@ def main():
             if process_stuck_buying_cycle(client, cycle, current_time):
                 buying_updated += 1
         
-        # Step 5: Process orphaned watching cycles (Scenario 2)
-        logger.info("🔍 SCENARIO 2: Checking for orphaned 'watching' cycles...")
-        orphaned_watching_cycles = get_watching_cycles_with_quantity()
+        # Step 5: Process watching cycles with position synchronization (Enhanced Scenario 2)
+        logger.info("🔍 SCENARIO 2: Checking 'watching' cycles for position synchronization...")
+        all_watching_cycles = get_all_watching_cycles()
         
         watching_processed = 0
         watching_updated = 0
         
-        for cycle in orphaned_watching_cycles:
+        for cycle in all_watching_cycles:
             watching_processed += 1
-            logger.info(f"📋 Processing watching cycle {watching_processed}/{len(orphaned_watching_cycles)}: {cycle.id}")
+            logger.info(f"📋 Processing watching cycle {watching_processed}/{len(all_watching_cycles)}: {cycle.id}")
             
-            if process_orphaned_watching_cycle(client, cycle, current_time):
+            if process_watching_cycle_with_position_sync(client, cycle, current_time):
                 watching_updated += 1
         
         # Step 6: Summary
@@ -412,9 +607,9 @@ def main():
         logger.info(f"📊 Stuck buying cycles found: {len(stuck_buying_cycles)}")
         logger.info(f"📊 Buying cycles processed: {buying_processed}")
         logger.info(f"📊 Buying cycles corrected: {buying_updated}")
-        logger.info(f"📊 Orphaned watching cycles found: {len(orphaned_watching_cycles)}")
+        logger.info(f"📊 Watching cycles found: {len(all_watching_cycles)}")
         logger.info(f"📊 Watching cycles processed: {watching_processed}")
-        logger.info(f"📊 Watching cycles corrected: {watching_updated}")
+        logger.info(f"📊 Watching cycles synced/corrected: {watching_updated}")
         
         if DRY_RUN:
             logger.info("🔍 DRY RUN: No actual updates performed")
