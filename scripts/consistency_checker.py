@@ -48,8 +48,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Import configuration
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+from config import get_config
+
+config = get_config()
+
 # Configuration
-DRY_RUN = os.getenv('DRY_RUN', 'false').lower() == 'true'
+DRY_RUN = config.dry_run_mode
 STALE_ORDER_THRESHOLD_MINUTES = 5  # Orders older than this are considered stale
 
 

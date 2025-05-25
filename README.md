@@ -119,6 +119,7 @@ CREATE TABLE dca_cycles (
     average_purchase_price DECIMAL(20, 10) NOT NULL DEFAULT 0,
     safety_orders INT NOT NULL DEFAULT 0,
     latest_order_id VARCHAR(255) NULL,
+    latest_order_created_at TIMESTAMP NULL DEFAULT NULL,
     last_order_fill_price DECIMAL(20, 10) NULL,
     completed_at TIMESTAMP NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

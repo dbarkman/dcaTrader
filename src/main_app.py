@@ -17,7 +17,6 @@ import os
 import sys
 from typing import Optional
 from decimal import Decimal
-from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import decimal
 from pathlib import Path
@@ -27,6 +26,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from alpaca.data.live import CryptoDataStream
 from alpaca.trading.stream import TradingStream
+from alpaca.common.exceptions import APIError
+import mysql.connector
+
+# Import our configuration and logging
+from config import get_config
+from utils.logging_config import setup_logging, get_asset_logger, log_asset_lifecycle_event
+from utils.notifications import alert_order_placed, alert_order_filled, alert_system_error, alert_critical_error
 
 # Import our database models and utilities
 from utils.db_utils import get_db_connection, execute_query
@@ -34,18 +40,9 @@ from models.asset_config import get_asset_config, update_asset_config
 from models.cycle_data import get_latest_cycle, update_cycle, create_cycle
 from utils.alpaca_client_rest import get_trading_client, place_limit_buy_order, get_positions, place_market_sell_order
 
-# Load environment variables
-load_dotenv()
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('logs/main_app.log', mode='a')
-    ]
-)
+# Initialize configuration and logging
+config = get_config()
+setup_logging("main_app", enable_asset_tracking=True)
 logger = logging.getLogger(__name__)
 
 # Global flag for graceful shutdown
@@ -87,19 +84,23 @@ def remove_pid_file():
 
 def validate_environment() -> bool:
     """
-    Validate that required environment variables are set.
+    Validate that required configuration is available.
     
     Returns:
-        True if all required variables are present, False otherwise
+        True if all required configuration is present, False otherwise
     """
-    required_vars = ['APCA_API_KEY_ID', 'APCA_API_SECRET_KEY']
-    missing_vars = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing_vars:
-        logger.error(f"Missing required environment variables: {missing_vars}")
+    try:
+        # Configuration validation is now handled by the config module
+        # Just verify we can access the key properties
+        _ = config.alpaca_api_key
+        _ = config.alpaca_api_secret
+        _ = config.db_host
+        logger.info("Configuration validation successful")
+        return True
+    except Exception as e:
+        logger.error(f"Configuration validation failed: {e}")
+        alert_critical_error("main_app", f"Configuration validation failed: {e}")
         return False
-    
-    return True
 
 
 async def on_crypto_quote(quote):
@@ -150,9 +151,12 @@ def check_and_place_base_order(quote):
     bid_price = quote.bid_price
     
     try:
+        # Get asset-specific logger for lifecycle tracking
+        asset_logger = get_asset_logger(symbol)
+        
         # Step 1: Check for recent orders to prevent duplicates
         now = datetime.now()
-        recent_order_cooldown = int(os.getenv('ORDER_COOLDOWN_SECONDS', '5'))  # Default 5 seconds
+        recent_order_cooldown = config.order_cooldown_seconds
         
         if symbol in recent_orders:
             time_since_order = now - recent_orders[symbol]['timestamp']
@@ -883,8 +887,22 @@ async def update_cycle_on_buy_fill(order, trade_update):
             logger.info(f"   🛡️ Safety Orders: {final_safety_orders}")
             logger.info(f"   📈 Order Type: {'Safety Order' if is_safety_order else 'Base Order'}")
             logger.info(f"   ⚡ Status: watching (ready for take-profit)")
+            
+            # Lifecycle marker: Log cycle start/continuation
+            if not is_safety_order:
+                logger.info(f"🚀 CYCLE_START: {symbol} - New DCA cycle initiated with base order")
+            else:
+                logger.info(f"🔄 CYCLE_CONTINUE: {symbol} - Safety order #{final_safety_orders} added to active cycle")
+            
+            # Lifecycle marker: Log cycle start/continuation
+            if not is_safety_order:
+                logger.info(f"🚀 CYCLE_START: {symbol} - New DCA cycle initiated with base order")
+            else:
+                logger.info(f"🔄 CYCLE_CONTINUE: {symbol} - Safety order #{final_safety_orders} added to active cycle")
         else:
             logger.error(f"❌ Failed to update cycle database for {symbol}")
+            logger.error(f"❌ CYCLE_ERROR: {symbol} - Failed to update cycle after buy fill")
+            logger.error(f"❌ CYCLE_ERROR: {symbol} - Failed to update cycle after buy fill")
             
     except Exception as e:
         logger.error(f"❌ Error updating cycle on BUY fill for {order.symbol}: {e}")
@@ -982,6 +1000,22 @@ async def update_cycle_on_sell_fill(order, trade_update):
         
         logger.info(f"✅ Cycle {current_cycle.id} marked as complete")
         
+        # Calculate profit for lifecycle marker
+        profit_amount = avg_fill_price - current_cycle.average_purchase_price
+        profit_percent = (profit_amount / current_cycle.average_purchase_price) * 100
+        total_profit = profit_amount * current_cycle.quantity
+        
+        # Lifecycle marker: Log cycle completion
+        logger.info(f"✅ CYCLE_COMPLETE: {symbol} - Profit: ${total_profit:.2f} ({profit_percent:.2f}%)")
+        
+        # Calculate profit for lifecycle marker
+        profit_amount = avg_fill_price - current_cycle.average_purchase_price
+        profit_percent = (profit_amount / current_cycle.average_purchase_price) * 100
+        total_profit = profit_amount * current_cycle.quantity
+        
+        # Lifecycle marker: Log cycle completion
+        logger.info(f"✅ CYCLE_COMPLETE: {symbol} - Profit: ${total_profit:.2f} ({profit_percent:.2f}%)")
+        
         # Step 5: Update dca_assets.last_sell_price
         asset_update_success = update_asset_config(asset_config.id, {'last_sell_price': avg_fill_price})
         if not asset_update_success:
@@ -1023,6 +1057,8 @@ async def update_cycle_on_sell_fill(order, trade_update):
         
     except Exception as e:
         logger.error(f"❌ Error processing SELL fill for {order.symbol}: {e}")
+        logger.error(f"❌ CYCLE_ERROR: {order.symbol} - Failed to process sell fill: {e}")
+        logger.error(f"❌ CYCLE_ERROR: {order.symbol} - Failed to process sell fill: {e}")
         logger.exception("Full traceback:")
 
 

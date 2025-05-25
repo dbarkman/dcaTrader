@@ -217,13 +217,18 @@ def send_email_alert(subject: str, body: str) -> bool:
         bool: True if sent successfully, False otherwise
     """
     try:
-        # Get SMTP configuration from environment
-        smtp_server = os.getenv('SMTP_SERVER')
-        smtp_port = int(os.getenv('SMTP_PORT', '587'))
-        smtp_username = os.getenv('SMTP_USERNAME')
-        smtp_password = os.getenv('SMTP_PASSWORD')
-        from_email = os.getenv('ALERT_EMAIL_FROM')
-        to_email = os.getenv('ALERT_EMAIL_TO')
+        # Import configuration
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+        from config import get_config
+        config = get_config()
+        
+        # Get SMTP configuration from centralized config
+        smtp_server = config.smtp_server
+        smtp_port = config.smtp_port
+        smtp_username = config.smtp_username
+        smtp_password = config.smtp_password
+        from_email = config.alert_email_from
+        to_email = config.alert_email_to
         
         # Check if email is configured
         if not all([smtp_server, smtp_username, smtp_password, from_email, to_email]):

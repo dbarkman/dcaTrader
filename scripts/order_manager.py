@@ -43,10 +43,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Import configuration
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+from config import get_config
+
+config = get_config()
+
 # Configuration
-STALE_ORDER_THRESHOLD_MINUTES = int(os.getenv('STALE_ORDER_THRESHOLD_MINUTES', '5'))
+STALE_ORDER_THRESHOLD_MINUTES = config.stale_order_threshold_minutes
 STALE_ORDER_THRESHOLD = timedelta(minutes=STALE_ORDER_THRESHOLD_MINUTES)
-DRY_RUN = os.getenv('DRY_RUN', 'false').lower() == 'true'
+DRY_RUN = config.dry_run_mode
 
 
 def get_current_utc_time() -> datetime:
