@@ -3780,6 +3780,300 @@ def run_phase9_test():
     return asyncio.run(test_phase9_tradingstream_order_cancellation_handling())
 
 
+def test_phase10_order_manager_cleans_orders():
+    """
+    Integration Test for Phase 10: Order Manager Caretaker Script
+    
+    This test verifies that the order_manager.py script correctly identifies and cancels:
+    1. Stale BUY limit orders older than the threshold
+    2. Orphaned orders not tracked by any active cycle
+    
+    The test uses actual Alpaca orders and database state to ensure end-to-end functionality.
+    
+    Scenarios tested:
+    1. Stale BUY order management (orders older than threshold)
+    2. Orphaned order management (orders not tracked in database)
+    3. Active order preservation (orders that should NOT be canceled)
+    """
+    print("\n" + "="*80)
+    print("PHASE 10 INTEGRATION TEST: Order Manager Caretaker Script")
+    print("="*80)
+    print("TESTING: Stale and orphaned order management via order_manager.py...")
+    
+    test_asset_id = None
+    test_cycle_id = None
+    stale_order_id = None
+    orphaned_order_id = None
+    active_order_id = None
+    client = None
+    
+    try:
+        # SETUP: Database and Alpaca connections
+        print("\n1. 🔧 SETUP: Preparing test environment...")
+        if not check_connection():
+            print("❌ FAILED: Database connection test failed")
+            return False
+        
+        client = get_trading_client()
+        if not client:
+            print("❌ FAILED: Could not initialize Alpaca trading client")
+            return False
+        print("✅ SUCCESS: Database and Alpaca connections established")
+        
+        # SETUP: Clean up any existing orders first
+        print("\n2. 🔧 SETUP: Cleaning up existing orders...")
+        initial_cleanup_success = robust_alpaca_teardown(timeout_seconds=10)
+        if not initial_cleanup_success:
+            print("⚠️ WARNING: Initial cleanup had issues, continuing anyway...")
+        
+        # SETUP: Create test asset configuration
+        test_symbol = 'BTC/USD'
+        print(f"\n3. 🔧 SETUP: Creating test asset configuration for {test_symbol}...")
+        
+        insert_asset_query = """
+        INSERT INTO dca_assets (
+            asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+            max_safety_orders, safety_order_deviation, take_profit_percent,
+            cooldown_period, buy_order_price_deviation_percent
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        asset_params = (
+            test_symbol, True, Decimal('50.00'), Decimal('25.00'),
+            3, Decimal('2.0'), Decimal('1.5'), 300, Decimal('3.0')
+        )
+        
+        test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        print(f"✅ SUCCESS: Created test asset with ID {test_asset_id}")
+        
+        # TEST SCENARIO 1: Create a stale BUY order (simulate old order)
+        print(f"\n4. 🎯 SCENARIO 1: Creating stale BUY order...")
+        
+        # Place a BUY order far below market price (won't fill)
+        stale_order_price = 50000.0  # Well below current BTC price
+        stale_order_qty = 0.001
+        
+        stale_order = place_limit_buy_order(client, test_symbol, stale_order_qty, stale_order_price, 'gtc')
+        if not stale_order:
+            print("❌ FAILED: Could not place stale BUY order")
+            return False
+        
+        stale_order_id = stale_order.id
+        print(f"✅ SUCCESS: Placed stale BUY order:")
+        print(f"   Order ID: {stale_order_id}")
+        print(f"   Price: ${stale_order_price:,.2f} (far below market)")
+        print(f"   Quantity: {stale_order_qty} BTC")
+        
+        # TEST SCENARIO 2: Create an orphaned order (not tracked in database)
+        print(f"\n5. 🎯 SCENARIO 2: Creating orphaned order...")
+        
+        # Place another order that won't be tracked by any cycle
+        orphaned_order_price = 51000.0
+        orphaned_order_qty = 0.0005
+        
+        orphaned_order = place_limit_buy_order(client, test_symbol, orphaned_order_qty, orphaned_order_price, 'gtc')
+        if not orphaned_order:
+            print("❌ FAILED: Could not place orphaned order")
+            return False
+        
+        orphaned_order_id = orphaned_order.id
+        print(f"✅ SUCCESS: Placed orphaned order:")
+        print(f"   Order ID: {orphaned_order_id}")
+        print(f"   Price: ${orphaned_order_price:,.2f}")
+        print(f"   Quantity: {orphaned_order_qty} BTC")
+        print(f"   Status: Not tracked in any database cycle")
+        
+        # TEST SCENARIO 3: Create an active order (should NOT be canceled)
+        print(f"\n6. 🎯 SCENARIO 3: Creating active order with database tracking...")
+        
+        # Place an order and track it in a database cycle
+        active_order_price = 52000.0
+        active_order_qty = 0.0008
+        
+        active_order = place_limit_buy_order(client, test_symbol, active_order_qty, active_order_price, 'gtc')
+        if not active_order:
+            print("❌ FAILED: Could not place active order")
+            return False
+        
+        active_order_id = active_order.id
+        
+        # Create a cycle that tracks this order
+        active_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='buying',  # Active status
+            quantity=Decimal('0'),
+            average_purchase_price=Decimal('0'),
+            safety_orders=0,
+            latest_order_id=str(active_order_id)  # Convert UUID to string
+        )
+        
+        if not active_cycle:
+            print("❌ FAILED: Could not create active cycle")
+            return False
+        
+        test_cycle_id = active_cycle.id
+        print(f"✅ SUCCESS: Placed active order with database tracking:")
+        print(f"   Order ID: {active_order_id}")
+        print(f"   Cycle ID: {test_cycle_id}")
+        print(f"   Status: buying (actively tracked)")
+        print(f"   This order should NOT be canceled")
+        
+        # VERIFICATION: Check all orders are placed
+        print(f"\n7. ✅ VERIFICATION: Checking all orders are placed...")
+        
+        current_orders = get_open_orders(client)
+        order_ids = [o.id for o in current_orders]
+        
+        print(f"   Found {len(current_orders)} open orders:")
+        for order in current_orders:
+            print(f"   • {order.id}: {order.symbol} {order.side.value} {order.qty} @ ${order.limit_price}")
+        
+        if not all(oid in order_ids for oid in [stale_order_id, orphaned_order_id, active_order_id]):
+            print("❌ FAILED: Not all test orders were placed successfully")
+            return False
+        
+        print("✅ SUCCESS: All test orders confirmed on Alpaca")
+        
+        # SIMULATE ORDER AGE: Wait a moment, then simulate old orders
+        print(f"\n8. ⏱️ SIMULATING: Order aging (for testing purposes)...")
+        print("   In production, orders would need to be >5 minutes old")
+        print("   For testing, we'll use a shorter threshold")
+        
+        # ACTION: Run order_manager.py with shorter threshold for testing
+        print(f"\n9. 🎯 ACTION: Running order_manager.py with test configuration...")
+        
+        # Set environment variables for testing
+        test_env = os.environ.copy()
+        test_env['STALE_ORDER_THRESHOLD_MINUTES'] = '0'  # 0 minutes for immediate testing
+        test_env['DRY_RUN'] = 'false'  # Actually cancel orders
+        
+        # Run the order manager script
+        import subprocess
+        result = subprocess.run(
+            ['python', 'scripts/order_manager.py'],
+            env=test_env,
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd()
+        )
+        
+        print(f"   Order manager exit code: {result.returncode}")
+        if result.stdout:
+            print("   Order manager output:")
+            for line in result.stdout.strip().split('\n'):
+                print(f"     {line}")
+        
+        if result.stderr:
+            print("   Order manager errors:")
+            for line in result.stderr.strip().split('\n'):
+                print(f"     {line}")
+        
+        if result.returncode != 0:
+            print("❌ FAILED: Order manager script failed")
+            return False
+        
+        print("✅ SUCCESS: Order manager script completed")
+        
+        # VERIFICATION: Check which orders were canceled
+        print(f"\n10. ✅ VERIFICATION: Checking order cancellation results...")
+        
+        # Wait a moment for cancellations to process
+        time.sleep(3)
+        
+        final_orders = get_open_orders(client)
+        final_order_ids = [o.id for o in final_orders]
+        
+        print(f"   Orders remaining after cleanup: {len(final_orders)}")
+        for order in final_orders:
+            print(f"   • {order.id}: {order.symbol} {order.side.value} {order.qty} @ ${order.limit_price}")
+        
+        # ASSERT: Verify expected cancellation behavior
+        print(f"\n11. ✅ ASSERT: Verifying cancellation behavior...")
+        
+        # Stale BUY order should be canceled
+        stale_canceled = stale_order_id not in final_order_ids
+        print(f"   Stale BUY order canceled: {stale_canceled} ✓" if stale_canceled else f"   Stale BUY order canceled: {stale_canceled} ❌")
+        
+        # Orphaned order should be canceled
+        orphaned_canceled = orphaned_order_id not in final_order_ids
+        print(f"   Orphaned order canceled: {orphaned_canceled} ✓" if orphaned_canceled else f"   Orphaned order canceled: {orphaned_canceled} ❌")
+        
+        # Active order should NOT be canceled (it's tracked in database)
+        active_preserved = active_order_id in final_order_ids
+        print(f"   Active order preserved: {active_preserved} ✓" if active_preserved else f"   Active order preserved: {active_preserved} ❌")
+        
+        # Overall verification
+        if stale_canceled and orphaned_canceled and active_preserved:
+            print("✅ SUCCESS: Order manager behaved correctly!")
+            print("   • Stale BUY orders were canceled")
+            print("   • Orphaned orders were canceled")
+            print("   • Active tracked orders were preserved")
+        else:
+            print("❌ FAILED: Order manager did not behave as expected")
+            return False
+        
+        # VERIFICATION: Check database state
+        print(f"\n12. ✅ VERIFICATION: Checking database state...")
+        
+        # The active cycle should still exist and be unchanged
+        current_cycle = get_latest_cycle(test_asset_id)
+        if (not current_cycle or 
+            current_cycle.id != test_cycle_id or
+            current_cycle.status != 'buying' or
+            current_cycle.latest_order_id != str(active_order_id)):
+            print("❌ FAILED: Active cycle was unexpectedly modified")
+            print(f"   Expected order ID: {str(active_order_id)}")
+            print(f"   Actual order ID: {current_cycle.latest_order_id if current_cycle else 'None'}")
+            print(f"   Expected cycle ID: {test_cycle_id}")
+            print(f"   Actual cycle ID: {current_cycle.id if current_cycle else 'None'}")
+            print(f"   Expected status: buying")
+            print(f"   Actual status: {current_cycle.status if current_cycle else 'None'}")
+            return False
+        
+        print("✅ SUCCESS: Database state correctly preserved")
+        print("   Active cycle remains unchanged")
+        
+        print(f"\n🎉 PHASE 10 INTEGRATION TEST COMPLETED SUCCESSFULLY!")
+        print("="*80)
+        print("PHASE 10 SUMMARY:")
+        print("✅ Stale BUY order identification and cancellation working")
+        print("✅ Orphaned order identification and cancellation working")
+        print("✅ Active order preservation working correctly")
+        print("✅ Database state management correct")
+        print("✅ Order manager script execution successful")
+        print("🚀 Phase 10 order management functionality is fully operational!")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ FAILED: Exception during Phase 10 test: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+        
+    finally:
+        # COMPREHENSIVE TEARDOWN: Clean up all test resources
+        try:
+            comprehensive_test_teardown(
+                test_name="Phase 10 Order Manager",
+                asset_ids=[test_asset_id] if test_asset_id else None,
+                cycle_ids=[test_cycle_id] if test_cycle_id else None,
+                test_symbols=[test_symbol],
+                timeout_seconds=10
+            )
+        except Exception as teardown_error:
+            print(f"❌ CRITICAL TEARDOWN FAILURE: {teardown_error}")
+            print("⚠️ Manual cleanup may be required")
+
+
+def run_phase10_test():
+    """Wrapper function to run the Phase 10 test."""
+    return test_phase10_order_manager_cleans_orders()
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -3875,6 +4169,15 @@ def main():
                 print("\n❌ Phase 9: ❌ FAILED")
                 sys.exit(1)
             return
+        elif phase_arg == 'phase10':
+            print("\n🎯 Running ONLY Phase 10 tests...")
+            phase10_success = run_phase10_test()
+            if phase10_success:
+                print("\n🎉 Phase 10: ✅ PASSED")
+            else:
+                print("\n❌ Phase 10: ❌ FAILED")
+                sys.exit(1)
+            return
         elif phase_arg == 'simulated':
             print("\n🎯 Running ONLY Simulated WebSocket Handler tests...")
             
@@ -3965,6 +4268,7 @@ def main():
     phase7_success = False
     phase8_success = False
     phase9_success = False
+    phase10_success = False
     
     # Run Phase 1 tests
     print("\nRunning Phase 1 tests...")
@@ -4002,6 +4306,10 @@ def main():
     print("\nRunning Phase 9 tests...")
     phase9_success = run_phase9_test()
     
+    # Run Phase 10 tests (Order Manager Caretaker Script)
+    print("\nRunning Phase 10 tests...")
+    phase10_success = run_phase10_test()
+    
     # Final results
     print("\n" + "="*60)
     print("INTEGRATION TEST RESULTS SUMMARY")
@@ -4016,8 +4324,9 @@ def main():
     print(f"Phase 7 (TradingStream BUY Order Fill Processing): {'✅ PASSED' if phase7_success else '❌ FAILED'}")
     print(f"Phase 8 (TradingStream SELL Order Fill Processing): {'✅ PASSED' if phase8_success else '❌ FAILED'}")
     print(f"Phase 9 (TradingStream Order Cancellation/Rejection Handling): {'✅ PASSED' if phase9_success else '❌ FAILED'}")
+    print(f"Phase 10 (Order Manager Caretaker Script): {'✅ PASSED' if phase10_success else '❌ FAILED'}")
     
-    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success, phase9_success]):
+    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success, phase9_success, phase10_success]):
         print("\n🎉 ALL PHASES PASSED!")
         print("The DCA Trading Bot is fully functional and ready for production!")
     else:
@@ -4039,6 +4348,7 @@ def print_help():
     print("  python integration_test.py phase7          # Run only Phase 7 (TradingStream BUY Order Fill Processing)")
     print("  python integration_test.py phase8          # Run only Phase 8 (TradingStream SELL Order Fill Processing)")
     print("  python integration_test.py phase9          # Run only Phase 9 (TradingStream Order Cancellation/Rejection Handling)")
+    print("  python integration_test.py phase10         # Run only Phase 10 (Order Manager Caretaker Script)")
     print("  python integration_test.py simulated       # Run all simulated WebSocket handler tests")
     print("  python integration_test.py sim-base        # Run simulated base order placement test")
     print("  python integration_test.py sim-safety      # Run simulated safety order placement test")
@@ -4056,6 +4366,7 @@ def print_help():
     print("  Phase 7: Tests TradingStream BUY order fill processing logic")
     print("  Phase 8: Tests TradingStream SELL order fill processing logic")
     print("  Phase 9: Tests TradingStream order cancellation/rejection/expiration handling")
+    print("  Phase 10: Tests Order Manager Caretaker Script")
     print("\nSIMULATED TEST DESCRIPTIONS:")
     print("  simulated: Run all simulated WebSocket handler tests (fast, no waiting)")
     print("  sim-base: Test MarketDataStream base order placement with mock quote")
