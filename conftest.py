@@ -65,6 +65,7 @@ def sample_cycle_data():
         'average_purchase_price': Decimal('50000.00'),
         'safety_orders': 2,
         'latest_order_id': 'order123',
+        'latest_order_created_at': datetime.now(),
         'last_order_fill_price': Decimal('49000.00'),
         'completed_at': None,
         'created_at': datetime.now(),

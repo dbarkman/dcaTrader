@@ -85,6 +85,7 @@ class TestCooldownManager(unittest.TestCase):
                 'average_purchase_price': 0.0,
                 'safety_orders': 0,
                 'latest_order_id': None,
+                'latest_order_created_at': None,
                 'last_order_fill_price': None
             },
             {
@@ -98,6 +99,7 @@ class TestCooldownManager(unittest.TestCase):
                 'average_purchase_price': 0.0,
                 'safety_orders': 0,
                 'latest_order_id': None,
+                'latest_order_created_at': None,
                 'last_order_fill_price': None
             }
         ]
@@ -140,6 +142,7 @@ class TestCooldownManager(unittest.TestCase):
             'average_purchase_price': 50000.0,
             'safety_orders': 1,
             'latest_order_id': None,
+            'latest_order_created_at': None,
             'last_order_fill_price': 51000.0
         }
         

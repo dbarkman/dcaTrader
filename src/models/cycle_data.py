@@ -30,6 +30,7 @@ class DcaCycle:
     average_purchase_price: Decimal
     safety_orders: int
     latest_order_id: Optional[str]
+    latest_order_created_at: Optional[datetime]
     last_order_fill_price: Optional[Decimal]
     completed_at: Optional[datetime]
     created_at: datetime
@@ -54,6 +55,7 @@ class DcaCycle:
             average_purchase_price=Decimal(str(data['average_purchase_price'])),
             safety_orders=data['safety_orders'],
             latest_order_id=data['latest_order_id'],
+            latest_order_created_at=data['latest_order_created_at'],
             last_order_fill_price=Decimal(str(data['last_order_fill_price'])) if data['last_order_fill_price'] is not None else None,
             completed_at=data['completed_at'],
             created_at=data['created_at'],
@@ -77,7 +79,7 @@ def get_latest_cycle(asset_id: int) -> Optional[DcaCycle]:
     try:
         query = """
         SELECT id, asset_id, status, quantity, average_purchase_price,
-               safety_orders, latest_order_id, last_order_fill_price,
+               safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
                completed_at, created_at, updated_at
         FROM dca_cycles 
         WHERE asset_id = %s
@@ -109,6 +111,7 @@ def create_cycle(
     average_purchase_price: Decimal = Decimal('0'),
     safety_orders: int = 0,
     latest_order_id: Optional[str] = None,
+    latest_order_created_at: Optional[datetime] = None,
     last_order_fill_price: Optional[Decimal] = None,
     completed_at: Optional[datetime] = None
 ) -> DcaCycle:
@@ -122,6 +125,7 @@ def create_cycle(
         average_purchase_price: Initial average purchase price (default: 0)
         safety_orders: Initial safety order count (default: 0)
         latest_order_id: ID of the latest order (default: None)
+        latest_order_created_at: Timestamp when the latest order was created (default: None)
         last_order_fill_price: Price of the last order fill (default: None)
         completed_at: Completion timestamp (default: None)
         
@@ -135,8 +139,8 @@ def create_cycle(
         query = """
         INSERT INTO dca_cycles (
             asset_id, status, quantity, average_purchase_price,
-            safety_orders, latest_order_id, last_order_fill_price, completed_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price, completed_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
         params = (
@@ -146,6 +150,7 @@ def create_cycle(
             average_purchase_price,
             safety_orders,
             latest_order_id,
+            latest_order_created_at,
             last_order_fill_price,
             completed_at
         )
@@ -158,7 +163,7 @@ def create_cycle(
             # Fetch the complete cycle record with timestamps
             fetch_query = """
             SELECT id, asset_id, status, quantity, average_purchase_price,
-                   safety_orders, latest_order_id, last_order_fill_price,
+                   safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
                    completed_at, created_at, updated_at
             FROM dca_cycles 
             WHERE id = %s
@@ -250,7 +255,7 @@ def get_cycle_by_id(cycle_id: int) -> Optional[DcaCycle]:
     try:
         query = """
         SELECT id, asset_id, status, quantity, average_purchase_price,
-               safety_orders, latest_order_id, last_order_fill_price,
+               safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
                completed_at, created_at, updated_at
         FROM dca_cycles 
         WHERE id = %s

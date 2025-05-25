@@ -60,8 +60,8 @@ async def test_sell_fill_no_asset_config_found(caplog):
         'id': 55, 'asset_id': 99, 'status': 'selling',
         'quantity': Decimal('0.02'), 'average_purchase_price': Decimal('48000.0'),
         'safety_orders': 2, 'latest_order_id': 'sell_order_789',
-        'last_order_fill_price': Decimal('47000.0'), 'completed_at': None,
-        'created_at': None, 'updated_at': None
+        'latest_order_created_at': None, 'last_order_fill_price': Decimal('47000.0'), 
+        'completed_at': None, 'created_at': None, 'updated_at': None
     }
     
     with patch('main_app.execute_query') as mock_execute_query, \
@@ -94,8 +94,8 @@ async def test_sell_fill_invalid_fill_price(caplog):
         'id': 66, 'asset_id': 2, 'status': 'selling',
         'quantity': Decimal('1.5'), 'average_purchase_price': Decimal('150.0'),
         'safety_orders': 0, 'latest_order_id': 'sell_order_invalid',
-        'last_order_fill_price': Decimal('145.0'), 'completed_at': None,
-        'created_at': None, 'updated_at': None
+        'latest_order_created_at': None, 'last_order_fill_price': Decimal('145.0'), 
+        'completed_at': None, 'created_at': None, 'updated_at': None
     }
     
     mock_asset_config = MagicMock()

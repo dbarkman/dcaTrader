@@ -56,8 +56,8 @@ async def test_order_cancellation_handles_update_failure(caplog):
         'id': 99, 'asset_id': 4, 'status': 'buying',
         'quantity': Decimal('0'), 'average_purchase_price': Decimal('0'),
         'safety_orders': 0, 'latest_order_id': 'failed_update_order',
-        'last_order_fill_price': None, 'completed_at': None,
-        'created_at': None, 'updated_at': None
+        'latest_order_created_at': None, 'last_order_fill_price': None, 
+        'completed_at': None, 'created_at': None, 'updated_at': None
     }
     
     with patch('main_app.execute_query') as mock_execute_query, \
@@ -87,8 +87,8 @@ async def test_order_cancellation_calls_update_cycle_correctly():
         'id': 42, 'asset_id': 1, 'status': 'buying',
         'quantity': Decimal('0'), 'average_purchase_price': Decimal('0'),
         'safety_orders': 0, 'latest_order_id': 'test_order_123',
-        'last_order_fill_price': None, 'completed_at': None,
-        'created_at': None, 'updated_at': None
+        'latest_order_created_at': None, 'last_order_fill_price': None,
+        'completed_at': None, 'created_at': None, 'updated_at': None
     }
     
     with patch('main_app.execute_query') as mock_execute_query, \

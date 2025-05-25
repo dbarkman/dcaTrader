@@ -52,6 +52,7 @@ class TestBuyFillProcessing:
             'average_purchase_price': Decimal('0'),
             'safety_orders': 0,
             'latest_order_id': 'test_order_123',
+            'latest_order_created_at': datetime.now(),
             'last_order_fill_price': None,
             'completed_at': None,
             'created_at': datetime.now(),

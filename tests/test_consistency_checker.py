@@ -109,6 +109,7 @@ class TestConsistencyChecker(unittest.TestCase):
                 'average_purchase_price': Decimal('50000.0'),
                 'safety_orders': 0,
                 'latest_order_id': 'order_123',
+                'latest_order_created_at': self.current_time,
                 'last_order_fill_price': None
             },
             {
@@ -122,6 +123,7 @@ class TestConsistencyChecker(unittest.TestCase):
                 'average_purchase_price': Decimal('0'),
                 'safety_orders': 0,
                 'latest_order_id': None,
+                'latest_order_created_at': None,
                 'last_order_fill_price': None
             }
         ]
@@ -163,6 +165,7 @@ class TestConsistencyChecker(unittest.TestCase):
                 'average_purchase_price': Decimal('50000.0'),
                 'safety_orders': 1,
                 'latest_order_id': None,
+                'latest_order_created_at': None,
                 'last_order_fill_price': Decimal('51000.0')
             }
         ]
@@ -453,6 +456,7 @@ class TestConsistencyChecker(unittest.TestCase):
                 'average_purchase_price': Decimal('50000.0'),
                 'safety_orders': 1,
                 'latest_order_id': None,
+                'latest_order_created_at': None,
                 'last_order_fill_price': Decimal('51000.0')
             },
             {
@@ -466,6 +470,7 @@ class TestConsistencyChecker(unittest.TestCase):
                 'average_purchase_price': Decimal('0'),
                 'safety_orders': 0,
                 'latest_order_id': None,
+                'latest_order_created_at': None,
                 'last_order_fill_price': None
             }
         ]

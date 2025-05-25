@@ -51,6 +51,50 @@ class TestTakeProfitConditions:
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_trading_client')
     @patch('main_app.place_market_sell_order')
+    @patch('main_app.update_cycle')
+    def test_take_profit_updates_database_on_order_placement(self, mock_update_cycle, mock_place_order, 
+                                                           mock_get_client, mock_get_cycle, mock_get_asset):
+        """Test that database is updated when take-profit order is placed"""
+        
+        # Setup: All conditions met for take-profit
+        mock_get_asset.return_value = self.mock_asset_config
+        mock_get_cycle.return_value = self.mock_cycle
+        mock_client = Mock()
+        mock_get_client.return_value = mock_client
+        
+        mock_order = Mock()
+        mock_order.id = 'sell_order_123'
+        mock_place_order.return_value = mock_order
+        mock_update_cycle.return_value = True
+        
+        # Execute
+        with patch('main_app.recent_orders', {}):
+            check_and_place_take_profit_order(self.mock_quote)
+        
+        # Verify: Market sell order was placed
+        mock_place_order.assert_called_once()
+        
+        # Verify: Database was updated with selling status
+        mock_update_cycle.assert_called_once()
+        cycle_id, updates = mock_update_cycle.call_args[0]
+        
+        assert cycle_id == self.mock_cycle.id
+        assert updates['status'] == 'selling'
+        assert updates['latest_order_id'] == 'sell_order_123'
+        assert 'latest_order_created_at' in updates
+        
+        # Verify the timestamp is recent (within last 5 seconds)
+        from datetime import datetime, timezone
+        timestamp = updates['latest_order_created_at']
+        now = datetime.now(timezone.utc)
+        time_diff = (now - timestamp).total_seconds()
+        assert time_diff < 5, f"Timestamp should be recent, but was {time_diff} seconds ago"
+
+    @pytest.mark.unit
+    @patch('main_app.get_asset_config')
+    @patch('main_app.get_latest_cycle')
+    @patch('main_app.get_trading_client')
+    @patch('main_app.place_market_sell_order')
     def test_take_profit_conditions_met(self, mock_place_order, mock_get_client, 
                                        mock_get_cycle, mock_get_asset):
         """Test that take-profit order is placed when all conditions are met"""
@@ -405,6 +449,64 @@ class TestTakeProfitErrorHandling:
         
         # Verify: Order was attempted but failed gracefully
         mock_place_order.assert_called_once()
+
+    @pytest.mark.unit
+    @patch('main_app.get_asset_config')
+    @patch('main_app.get_latest_cycle')
+    @patch('main_app.get_trading_client')
+    @patch('main_app.place_market_sell_order')
+    @patch('main_app.update_cycle')
+    @patch('main_app.logger')
+    def test_take_profit_handles_database_update_failure(self, mock_logger, mock_update_cycle, mock_place_order,
+                                                        mock_get_client, mock_get_cycle, mock_get_asset):
+        """Test graceful handling when database update fails after order placement"""
+        
+        mock_quote = Mock()
+        mock_quote.symbol = 'BTC/USD'
+        mock_quote.ask_price = 52000.0
+        mock_quote.bid_price = 52000.0
+        
+        mock_asset_config = Mock()
+        mock_asset_config.id = 1
+        mock_asset_config.is_enabled = True
+        mock_asset_config.take_profit_percent = Decimal('1.0')
+        mock_asset_config.safety_order_deviation = Decimal('2.5')
+        mock_asset_config.max_safety_orders = 5
+        
+        mock_cycle = Mock()
+        mock_cycle.id = 100
+        mock_cycle.status = 'watching'
+        mock_cycle.quantity = Decimal('0.5')
+        mock_cycle.average_purchase_price = Decimal('50000.0')
+        mock_cycle.safety_orders = 2
+        mock_cycle.last_order_fill_price = Decimal('49000.0')
+        
+        mock_get_asset.return_value = mock_asset_config
+        mock_get_cycle.return_value = mock_cycle
+        mock_client = Mock()
+        mock_get_client.return_value = mock_client
+        
+        mock_order = Mock()
+        mock_order.id = 'sell_order_456'
+        mock_place_order.return_value = mock_order
+        mock_update_cycle.return_value = False  # Database update fails
+        
+        # Execute - should not raise exception
+        with patch('main_app.recent_orders', {}):
+            check_and_place_take_profit_order(mock_quote)
+        
+        # Verify: Order was placed successfully
+        mock_place_order.assert_called_once()
+        
+        # Verify: Database update was attempted
+        mock_update_cycle.assert_called_once()
+        
+        # Verify: Error was logged when database update failed
+        error_logged = any(
+            call for call in mock_logger.error.call_args_list
+            if 'Failed to update cycle' in str(call) and 'sell_order_456' in str(call)
+        )
+        assert error_logged, "Should log error when database update fails"
 
 
 if __name__ == '__main__':

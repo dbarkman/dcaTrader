@@ -632,7 +632,22 @@ def check_and_place_take_profit_order(quote):
             logger.info(f"   Quantity: {sell_quantity:.8f}")
             logger.info(f"   Order Type: MARKET")
             logger.info(f"   💰 Take-profit triggered by {price_gain_pct:.2f}% gain")
-            # NOTE: We do NOT update the cycle here - that's TradingStream's job when it fills
+            
+            # NEW: Immediately update the cycle to reflect that we're actively trying to sell
+            from datetime import timezone
+            updates = {
+                'status': 'selling',
+                'latest_order_id': order.id,
+                'latest_order_created_at': datetime.now(timezone.utc)
+            }
+            
+            update_success = update_cycle(latest_cycle.id, updates)
+            if update_success:
+                logger.info(f"✅ Cycle {latest_cycle.id} status updated to 'selling', latest_order_id set for SELL order {order.id}")
+            else:
+                logger.error(f"❌ Failed to update cycle {latest_cycle.id} after placing SELL order {order.id}")
+                
+            # TradingStream will complete the cycle update when the order fills
         else:
             logger.error(f"❌ Failed to place take-profit order for {symbol}")
             
@@ -772,7 +787,7 @@ async def update_cycle_on_buy_fill(order, trade_update):
         # Step 1: Find the cycle by latest_order_id (Phase 7 requirement)
         cycle_query = """
         SELECT id, asset_id, status, quantity, average_purchase_price, 
-               safety_orders, latest_order_id, last_order_fill_price,
+               safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
                completed_at, created_at, updated_at
         FROM dca_cycles 
         WHERE latest_order_id = %s
@@ -987,7 +1002,7 @@ async def update_cycle_on_sell_fill(order, trade_update):
         # Step 1: Find the cycle by latest_order_id
         cycle_query = """
         SELECT id, asset_id, status, quantity, average_purchase_price, 
-               safety_orders, latest_order_id, last_order_fill_price,
+               safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
                completed_at, created_at, updated_at
         FROM dca_cycles 
         WHERE latest_order_id = %s
@@ -1072,14 +1087,6 @@ async def update_cycle_on_sell_fill(order, trade_update):
         # Lifecycle marker: Log cycle completion
         logger.info(f"✅ CYCLE_COMPLETE: {symbol} - Profit: ${total_profit:.2f} ({profit_percent:.2f}%)")
         
-        # Calculate profit for lifecycle marker
-        profit_amount = avg_fill_price - current_cycle.average_purchase_price
-        profit_percent = (profit_amount / current_cycle.average_purchase_price) * 100
-        total_profit = profit_amount * current_cycle.quantity
-        
-        # Lifecycle marker: Log cycle completion
-        logger.info(f"✅ CYCLE_COMPLETE: {symbol} - Profit: ${total_profit:.2f} ({profit_percent:.2f}%)")
-        
         # Step 5: Update dca_assets.last_sell_price
         asset_update_success = update_asset_config(asset_config.id, {'last_sell_price': avg_fill_price})
         if not asset_update_success:
@@ -1146,7 +1153,7 @@ async def update_cycle_on_order_cancellation(order, event):
         # Step 1: Try to find the cycle linked to this order
         cycle_query = """
         SELECT id, asset_id, status, quantity, average_purchase_price, 
-               safety_orders, latest_order_id, last_order_fill_price,
+               safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
                completed_at, created_at, updated_at
         FROM dca_cycles 
         WHERE latest_order_id = %s
