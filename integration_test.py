@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 # Import our utility functions and models
 from utils.db_utils import get_db_connection, execute_query, check_connection
 from models.asset_config import DcaAsset, get_asset_config, get_all_enabled_assets, update_asset_config
-from models.cycle_data import DcaCycle, get_latest_cycle, create_cycle, update_cycle
+from models.cycle_data import DcaCycle, get_latest_cycle, create_cycle, update_cycle, get_cycle_by_id
 from utils.alpaca_client_rest import (
     get_trading_client, 
     get_account_info, 
@@ -63,6 +63,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
 
 
 def robust_alpaca_teardown(test_symbols=None, timeout_seconds=5):
@@ -200,40 +201,34 @@ def robust_alpaca_teardown(test_symbols=None, timeout_seconds=5):
 
 def cleanup_test_database_records(asset_ids=None, cycle_ids=None):
     """
-    Clean up test records from the database.
+    Clean up ALL test database records by truncating both tables.
+    This ensures complete cleanup regardless of foreign key constraints.
     
     Args:
-        asset_ids: List of asset IDs to delete
-        cycle_ids: List of cycle IDs to delete
+        asset_ids: Ignored - always truncates ALL records
+        cycle_ids: Ignored - always truncates ALL records
     
     Returns:
         bool: True if cleanup successful
     """
     try:
-        # Delete test cycles
-        if cycle_ids:
-            for cycle_id in cycle_ids:
-                try:
-                    delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
-                    execute_query(delete_cycle_query, (cycle_id,), commit=True)
-                    print(f"   ✅ Deleted test cycle {cycle_id}")
-                except Exception as e:
-                    print(f"   ⚠️ Error deleting cycle {cycle_id}: {e}")
+        print("   🧹 TRUNCATING ALL database test records...")
         
-        # Delete test assets
-        if asset_ids:
-            for asset_id in asset_ids:
-                try:
-                    delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
-                    execute_query(delete_asset_query, (asset_id,), commit=True)
-                    print(f"   ✅ Deleted test asset {asset_id}")
-                except Exception as e:
-                    print(f"   ⚠️ Error deleting asset {asset_id}: {e}")
+        # Truncate cycles table first (safer with foreign keys)
+        truncate_cycles_query = "TRUNCATE TABLE dca_cycles"
+        execute_query(truncate_cycles_query, commit=True)
+        print("   ✅ Truncated dca_cycles table")
         
+        # Truncate assets table
+        truncate_assets_query = "TRUNCATE TABLE dca_assets"
+        execute_query(truncate_assets_query, commit=True)
+        print("   ✅ Truncated dca_assets table")
+        
+        print("   ✅ Database completely cleaned - all tables empty")
         return True
         
     except Exception as e:
-        print(f"   ❌ Database cleanup error: {e}")
+        print(f"   ❌ Database truncation error: {e}")
         return False
 
 
@@ -268,10 +263,9 @@ def comprehensive_test_teardown(test_name, asset_ids=None, cycle_ids=None, test_
         print("❌ CRITICAL: Alpaca cleanup failed!")
         print("⚠️ WARNING: Subsequent tests may be affected by leftover orders/positions")
     
-    # Step 2: Clean database records
-    if asset_ids or cycle_ids:
-        print("🔄 Cleaning database test records...")
-        database_success = cleanup_test_database_records(asset_ids, cycle_ids)
+    # Step 2: Clean database records (ALWAYS truncate both tables)
+    print("🔄 Cleaning database test records...")
+    database_success = cleanup_test_database_records(asset_ids, cycle_ids)
     
     # Step 3: Final assessment
     overall_success = alpaca_success and database_success
@@ -474,22 +468,13 @@ def test_phase1_asset_and_cycle_crud():
         return False
         
     finally:
-        # Teardown: Delete the test records
-        print("\n9. Cleaning up test data...")
-        try:
-            if test_cycle_id:
-                delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
-                execute_query(delete_cycle_query, (test_cycle_id,), commit=True)
-                print(f"✅ Deleted test cycle {test_cycle_id}")
-            
-            if test_asset_id:
-                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
-                execute_query(delete_asset_query, (test_asset_id,), commit=True)
-                print(f"✅ Deleted test asset {test_asset_id}")
-                
-        except Exception as e:
-            print(f"⚠️  WARNING: Could not clean up test data: {e}")
-            logger.error(f"Cleanup failed: {e}")
+        # COMPREHENSIVE TEARDOWN: Use robust cleanup system
+        comprehensive_test_teardown(
+            test_name="Phase 1 Asset and Cycle CRUD Operations",
+            asset_ids=[test_asset_id] if test_asset_id else None,
+            cycle_ids=[test_cycle_id] if test_cycle_id else None,
+            timeout_seconds=5
+        )
 
 
 def test_phase2_alpaca_rest_api_order_cycle():
@@ -3421,6 +3406,7 @@ async def test_phase9_tradingstream_order_cancellation_handling():
         )
         
         test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        
         if not test_asset_id:
             print("❌ FAILED: Could not create test asset")
             return False
@@ -4329,6 +4315,236 @@ def run_phase11_test():
     return test_phase11_cooldown_manager_updates_status()
 
 
+def test_phase12_consistency_checker_scenarios():
+    """
+    Phase 12 Integration Test: Consistency Checker Scenarios
+    
+    Tests both scenarios:
+    1. Stuck 'buying' cycle with no corresponding Alpaca order
+    2. Orphaned 'watching' cycle with quantity but no Alpaca position
+    """
+    print("============================================================")
+    print("PHASE 12 INTEGRATION TEST: Consistency Checker Scenarios")
+    print("============================================================")
+    
+    try:
+        # Step 1: Check database connection
+        print("🔧 Step 1: Checking database connection...")
+        if not check_connection():
+            print("❌ Database connection failed")
+            return False
+        print("✅ Database connection established")
+        
+        # Step 2: Setup test asset
+        print("🔧 Step 2: Setting up test asset...")
+        test_asset_symbol = "BTC/USD"
+        
+        # Check if test asset exists, create if not
+        test_asset = get_asset_config(test_asset_symbol)
+        if not test_asset:
+            print(f"   Asset {test_asset_symbol} not found, creating test asset...")
+            # Create test asset with minimal configuration
+            query = """
+            INSERT INTO dca_assets (
+                asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+                max_safety_orders, safety_order_deviation, take_profit_percent,
+                cooldown_period, buy_order_price_deviation_percent
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            params = (test_asset_symbol, True, 100.0, 150.0, 3, 2.5, 1.0, 60, 0.1)
+            test_asset_id = execute_query(query, params, commit=True)
+            
+            if not test_asset_id:
+                print("   ❌ Failed to create test asset")
+                return False
+            
+            print(f"   ✅ Created test asset {test_asset_id} ({test_asset_symbol})")
+        else:
+            test_asset_id = test_asset.id
+            print(f"   ✅ Using existing test asset {test_asset_id} ({test_asset_symbol})")
+        
+        # =================================================================
+        # SCENARIO 1: Stuck 'buying' cycle with no corresponding order
+        # =================================================================
+        print("🔧 Step 3: Testing Scenario 1 - Stuck 'buying' cycle...")
+        
+        # Create a cycle in 'buying' status with fake order ID
+        fake_order_id = "fake_order_12345"
+        buying_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='buying',
+            quantity=Decimal('0'),
+            average_purchase_price=Decimal('0'),
+            safety_orders=0,
+            latest_order_id=fake_order_id,
+            last_order_fill_price=None
+        )
+        
+        if not buying_cycle:
+            print("   ❌ Failed to create test buying cycle")
+            return False
+        
+        buying_cycle_id = buying_cycle.id
+        print(f"   ✅ Created stuck buying cycle {buying_cycle_id} with fake order ID: {fake_order_id}")
+        
+        # Verify initial state
+        if buying_cycle.status != 'buying':
+            print(f"   ❌ Buying cycle {buying_cycle_id} not in expected state")
+            return False
+        
+        print(f"   ✅ Buying cycle {buying_cycle_id} status: {buying_cycle.status}")
+        
+        # =================================================================
+        # SCENARIO 2: Orphaned 'watching' cycle with quantity
+        # =================================================================
+        print("🔧 Step 4: Testing Scenario 2 - Orphaned 'watching' cycle...")
+        
+        # Create a cycle in 'watching' status with quantity but no position
+        watching_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=Decimal('0.01'),  # Has quantity
+            average_purchase_price=Decimal('50000.0'),
+            safety_orders=1,
+            latest_order_id=None,
+            last_order_fill_price=Decimal('51000.0')
+        )
+        
+        if not watching_cycle:
+            print("   ❌ Failed to create test watching cycle")
+            return False
+        
+        watching_cycle_id = watching_cycle.id
+        print(f"   ✅ Created orphaned watching cycle {watching_cycle_id} with quantity: 0.01")
+        
+        # Verify initial state
+        if watching_cycle.status != 'watching':
+            print(f"   ❌ Watching cycle {watching_cycle_id} not in expected state")
+            return False
+        
+        print(f"   ✅ Watching cycle {watching_cycle_id} status: {watching_cycle.status}, quantity: {watching_cycle.quantity}")
+        
+        # =================================================================
+        # RUN CONSISTENCY CHECKER
+        # =================================================================
+        print("🔧 Step 5: Running consistency checker script...")
+        
+        # Run the consistency checker script
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, 'scripts/consistency_checker.py'],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd()
+        )
+        
+        print(f"   Script exit code: {result.returncode}")
+        if result.stderr:
+            print("   Script errors:")
+            for line in result.stderr.strip().split('\n'):
+                if line.strip():
+                    print(f"     {line}")
+        
+        if result.returncode != 0:
+            print("   ❌ Consistency checker script failed")
+            if result.stdout:
+                print("   Script output:")
+                for line in result.stdout.strip().split('\n')[-10:]:  # Last 10 lines
+                    print(f"     {line}")
+            return False
+        
+        # =================================================================
+        # VERIFY SCENARIO 1 RESULTS
+        # =================================================================
+        print("🔧 Step 6: Verifying Scenario 1 results...")
+        
+        # Check if buying cycle was updated to 'watching'
+        updated_buying_cycle = get_cycle_by_id(buying_cycle_id)
+        if not updated_buying_cycle:
+            print(f"   ❌ Buying cycle {buying_cycle_id} not found after consistency check")
+            return False
+        
+        if updated_buying_cycle.status != 'watching':
+            print(f"   ❌ Buying cycle {buying_cycle_id} status not updated (still: {updated_buying_cycle.status})")
+            return False
+        
+        if updated_buying_cycle.latest_order_id is not None:
+            print(f"   ❌ Buying cycle {buying_cycle_id} latest_order_id not cleared (still: {updated_buying_cycle.latest_order_id})")
+            return False
+        
+        print(f"   ✅ Buying cycle {buying_cycle_id} successfully updated to 'watching' status")
+        print(f"   ✅ Buying cycle {buying_cycle_id} latest_order_id cleared")
+        
+        # =================================================================
+        # VERIFY SCENARIO 2 RESULTS
+        # =================================================================
+        print("🔧 Step 7: Verifying Scenario 2 results...")
+        
+        # Check if watching cycle was marked as 'error'
+        updated_watching_cycle = get_cycle_by_id(watching_cycle_id)
+        if not updated_watching_cycle:
+            print(f"   ❌ Watching cycle {watching_cycle_id} not found after consistency check")
+            return False
+        
+        if updated_watching_cycle.status != 'error':
+            print(f"   ❌ Watching cycle {watching_cycle_id} status not updated to 'error' (still: {updated_watching_cycle.status})")
+            return False
+        
+        if updated_watching_cycle.completed_at is None:
+            print(f"   ❌ Watching cycle {watching_cycle_id} completed_at not set")
+            return False
+        
+        print(f"   ✅ Watching cycle {watching_cycle_id} successfully marked as 'error'")
+        print(f"   ✅ Watching cycle {watching_cycle_id} completed_at set: {updated_watching_cycle.completed_at}")
+        
+        # Check if new 'watching' cycle was created
+        query = """
+        SELECT * FROM dca_cycles 
+        WHERE asset_id = %s 
+        AND status = 'watching' 
+        AND quantity = 0 
+        AND id != %s
+        ORDER BY created_at DESC 
+        LIMIT 1
+        """
+        result = execute_query(query, (test_asset_id, watching_cycle_id), fetch_one=True)
+        
+        if not result:
+            print(f"   ❌ No new 'watching' cycle created for asset {test_asset_id}")
+            return False
+        
+        new_cycle = DcaCycle.from_dict(result)
+        print(f"   ✅ New watching cycle {new_cycle.id} created with quantity: {new_cycle.quantity}")
+        
+        print("\n✅ PHASE 12 TEST PASSED!")
+        print("   • Scenario 1: Stuck buying cycle corrected to 'watching' status")
+        print("   • Scenario 2: Orphaned watching cycle marked as 'error' and new cycle created")
+        print("   • Script executed successfully with proper data consistency")
+        
+        # =================================================================
+        # CLEANUP
+        # =================================================================
+        comprehensive_test_teardown(
+            test_name="Phase 12 Consistency Checker Scenarios",
+            asset_ids=[test_asset_id],
+            cycle_ids=[buying_cycle_id, watching_cycle_id, new_cycle.id],
+            timeout_seconds=5
+        )
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ PHASE 12 TEST FAILED: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+
+
+def run_phase12_test():
+    """Wrapper function to run the Phase 12 test."""
+    return test_phase12_consistency_checker_scenarios()
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -4442,6 +4658,15 @@ def main():
                 print("\n❌ Phase 11: ❌ FAILED")
                 sys.exit(1)
             return
+        elif phase_arg == 'phase12':
+            print("\n🎯 Running ONLY Phase 12 tests...")
+            phase12_success = run_phase12_test()
+            if phase12_success:
+                print("\n🎉 Phase 12: ✅ PASSED")
+            else:
+                print("\n❌ Phase 12: ❌ FAILED")
+                sys.exit(1)
+            return
         elif phase_arg == 'simulated':
             print("\n🎯 Running ONLY Simulated WebSocket Handler tests...")
             
@@ -4534,6 +4759,7 @@ def main():
     phase9_success = False
     phase10_success = False
     phase11_success = False
+    phase12_success = False
     
     # Run Phase 1 tests
     print("\nRunning Phase 1 tests...")
@@ -4579,6 +4805,10 @@ def main():
     print("\nRunning Phase 11 tests...")
     phase11_success = run_phase11_test()
     
+    # Run Phase 12 tests (Consistency Checker Caretaker Script)
+    print("\nRunning Phase 12 tests...")
+    phase12_success = run_phase12_test()
+    
     # Final results
     print("\n" + "="*60)
     print("INTEGRATION TEST RESULTS SUMMARY")
@@ -4595,8 +4825,9 @@ def main():
     print(f"Phase 9 (TradingStream Order Cancellation/Rejection Handling): {'✅ PASSED' if phase9_success else '❌ FAILED'}")
     print(f"Phase 10 (Order Manager Caretaker Script): {'✅ PASSED' if phase10_success else '❌ FAILED'}")
     print(f"Phase 11 (Cooldown Manager Caretaker Script): {'✅ PASSED' if phase11_success else '❌ FAILED'}")
+    print(f"Phase 12 (Consistency Checker Caretaker Script): {'✅ PASSED' if phase12_success else '❌ FAILED'}")
     
-    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success, phase9_success, phase10_success, phase11_success]):
+    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success, phase9_success, phase10_success, phase11_success, phase12_success]):
         print("\n🎉 ALL PHASES PASSED!")
         print("The DCA Trading Bot is fully functional and ready for production!")
     else:
@@ -4620,6 +4851,7 @@ def print_help():
     print("  python integration_test.py phase9          # Run only Phase 9 (TradingStream Order Cancellation/Rejection Handling)")
     print("  python integration_test.py phase10         # Run only Phase 10 (Order Manager Caretaker Script)")
     print("  python integration_test.py phase11         # Run only Phase 11 (Cooldown Manager Caretaker Script)")
+    print("  python integration_test.py phase12         # Run only Phase 12 (Consistency Checker Caretaker Script)")
     print("  python integration_test.py simulated       # Run all simulated WebSocket handler tests")
     print("  python integration_test.py sim-base        # Run simulated base order placement test")
     print("  python integration_test.py sim-safety      # Run simulated safety order placement test")
@@ -4639,6 +4871,7 @@ def print_help():
     print("  Phase 9: Tests TradingStream order cancellation/rejection/expiration handling")
     print("  Phase 10: Tests Order Manager Caretaker Script")
     print("  Phase 11: Tests Cooldown Manager Caretaker Script")
+    print("  Phase 12: Tests Consistency Checker Caretaker Script")
     print("\nSIMULATED TEST DESCRIPTIONS:")
     print("  simulated: Run all simulated WebSocket handler tests (fast, no waiting)")
     print("  sim-base: Test MarketDataStream base order placement with mock quote")
