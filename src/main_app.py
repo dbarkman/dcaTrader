@@ -19,6 +19,7 @@ from typing import Optional
 from decimal import Decimal
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+import decimal
 
 # Add src directory to path for imports
 sys.path.insert(0, os.path.dirname(__file__))
@@ -27,9 +28,9 @@ from alpaca.data.live import CryptoDataStream
 from alpaca.trading.stream import TradingStream
 
 # Import our database models and utilities
-from utils.db_utils import get_db_connection
-from models.asset_config import get_asset_config
-from models.cycle_data import get_latest_cycle, update_cycle
+from utils.db_utils import get_db_connection, execute_query
+from models.asset_config import get_asset_config, update_asset_config
+from models.cycle_data import get_latest_cycle, update_cycle, create_cycle
 from utils.alpaca_client_rest import get_trading_client, place_limit_buy_order, get_positions, place_market_sell_order
 
 # Load environment variables
@@ -699,6 +700,15 @@ async def on_trade_update(trade_update):
         # Phase 7: Update dca_cycles table on BUY order fills
         if order.side.lower() == 'buy':
             await update_cycle_on_buy_fill(order, trade_update)
+        
+        # Phase 8: Process SELL order fills (take-profit completion)
+        elif order.side.lower() == 'sell':
+            await update_cycle_on_sell_fill(order, trade_update)
+    
+    # Phase 9: Handle order cancellations, rejections, and expirations
+    elif event in ('canceled', 'cancelled', 'rejected', 'expired'):
+        logger.info(f"⚠️ ORDER {event.upper()}: {order.symbol} order {order.id}")
+        await update_cycle_on_order_cancellation(order, event)
 
 
 async def update_cycle_on_buy_fill(order, trade_update):
@@ -718,94 +728,131 @@ async def update_cycle_on_buy_fill(order, trade_update):
         
         logger.info(f"🔄 Updating cycle database for {symbol} BUY fill...")
         
-        # Step 1: Get the asset configuration
-        asset_config = get_asset_config(symbol)
-        if not asset_config:
-            logger.error(f"❌ Cannot update cycle: No asset config found for {symbol}")
+        # Step 1: Find the cycle by latest_order_id (Phase 7 requirement)
+        cycle_query = """
+        SELECT id, asset_id, status, quantity, average_purchase_price, 
+               safety_orders, latest_order_id, last_order_fill_price,
+               completed_at, created_at, updated_at
+        FROM dca_cycles 
+        WHERE latest_order_id = %s
+        """
+        
+        cycle_result = execute_query(cycle_query, (str(order_id),), fetch_one=True)
+        if not cycle_result:
+            logger.error(f"❌ Cannot update cycle: No cycle found with latest_order_id={order_id} for {symbol}")
             return
         
-        # Step 2: Get the latest cycle for this asset
-        latest_cycle = get_latest_cycle(asset_config.id)
-        if not latest_cycle:
-            logger.error(f"❌ Cannot update cycle: No cycle found for {symbol}")
+        # Convert to cycle object for easier access
+        from models.cycle_data import DcaCycle
+        latest_cycle = DcaCycle.from_dict(cycle_result)
+        
+        # Step 2: Get the asset configuration for validation
+        asset_config_query = """
+        SELECT asset_symbol, take_profit_percent 
+        FROM dca_assets 
+        WHERE id = %s
+        """
+        
+        asset_result = execute_query(asset_config_query, (latest_cycle.asset_id,), fetch_one=True)
+        if not asset_result:
+            logger.error(f"❌ Cannot update cycle: No asset config found for asset_id={latest_cycle.asset_id}")
             return
         
-        # Step 3: Extract fill details safely
-        fill_price = None
-        fill_qty = None
-        
-        # Try to get execution details from trade_update first
-        if hasattr(trade_update, 'price') and trade_update.price:
-            try:
-                fill_price = float(trade_update.price)
-            except (ValueError, TypeError):
-                logger.warning(f"Could not parse fill price from trade_update: {trade_update.price}")
-        
-        if hasattr(trade_update, 'qty') and trade_update.qty:
-            try:
-                fill_qty = float(trade_update.qty)
-            except (ValueError, TypeError):
-                logger.warning(f"Could not parse fill quantity from trade_update: {trade_update.qty}")
-        
-        # Fallback to order details if trade_update doesn't have execution info
-        if fill_qty is None and hasattr(order, 'qty') and order.qty:
-            try:
-                fill_qty = float(order.qty)
-            except (ValueError, TypeError):
-                logger.warning(f"Could not parse quantity from order: {order.qty}")
-        
-        if fill_price is None and hasattr(order, 'limit_price') and order.limit_price:
-            try:
-                fill_price = float(order.limit_price)
-                logger.info(f"Using limit price as fill price: ${fill_price}")
-            except (ValueError, TypeError):
-                logger.warning(f"Could not parse limit price from order: {order.limit_price}")
-        
-        if fill_price is None or fill_qty is None:
-            logger.error(f"❌ Cannot update cycle: Missing fill data (price={fill_price}, qty={fill_qty})")
+        # Verify symbol matches
+        if asset_result['asset_symbol'] != symbol:
+            logger.error(f"❌ Symbol mismatch: cycle asset={asset_result['asset_symbol']}, order symbol={symbol}")
             return
         
-        # Step 4: Calculate new cycle values
+        # Step 3: Extract fill details using Phase 7 specifications
+        filled_qty = None
+        avg_fill_price = None
+        
+        # Use order.filled_qty and order.filled_avg_price as per Phase 7 specs
+        if hasattr(order, 'filled_qty') and order.filled_qty:
+            try:
+                filled_qty = Decimal(str(order.filled_qty))
+            except (ValueError, TypeError, decimal.InvalidOperation):
+                logger.error(f"❌ Cannot parse filled_qty from order: {order.filled_qty}")
+                return
+        
+        if hasattr(order, 'filled_avg_price') and order.filled_avg_price:
+            try:
+                avg_fill_price = Decimal(str(order.filled_avg_price))
+            except (ValueError, TypeError, decimal.InvalidOperation):
+                logger.error(f"❌ Cannot parse filled_avg_price from order: {order.filled_avg_price}")
+                return
+        
+        # Fallback to trade_update execution details if order fields not available
+        if filled_qty is None and hasattr(trade_update, 'qty') and trade_update.qty:
+            try:
+                filled_qty = Decimal(str(trade_update.qty))
+                logger.info(f"Using trade_update qty as fallback: {filled_qty}")
+            except (ValueError, TypeError, decimal.InvalidOperation):
+                logger.warning(f"Could not parse qty from trade_update: {trade_update.qty}")
+        
+        if avg_fill_price is None and hasattr(trade_update, 'price') and trade_update.price:
+            try:
+                avg_fill_price = Decimal(str(trade_update.price))
+                logger.info(f"Using trade_update price as fallback: ${avg_fill_price}")
+            except (ValueError, TypeError, decimal.InvalidOperation):
+                logger.warning(f"Could not parse price from trade_update: {trade_update.price}")
+        
+        # Final validation
+        if filled_qty is None or avg_fill_price is None:
+            logger.error(f"❌ Cannot update cycle: Missing fill data (filled_qty={filled_qty}, avg_fill_price={avg_fill_price})")
+            return
+        
+        if filled_qty <= 0 or avg_fill_price <= 0:
+            logger.error(f"❌ Invalid fill data: filled_qty={filled_qty}, avg_fill_price={avg_fill_price}")
+            return
+        
+        # Step 4: Calculate new cycle values using Phase 7 formulas
         current_qty = latest_cycle.quantity
         current_avg_price = latest_cycle.average_purchase_price
         
-        new_fill_qty = Decimal(str(fill_qty))
-        new_fill_price = Decimal(str(fill_price))
-        
         # Calculate new total quantity
-        new_total_qty = current_qty + new_fill_qty
+        current_total_qty = current_qty + filled_qty
         
-        # Calculate new weighted average purchase price
-        if current_qty == 0:
-            # First purchase - use fill price as average
-            new_avg_price = new_fill_price
+        # Calculate new weighted average purchase price (Phase 7 formula)
+        if current_total_qty > 0:
+            if current_qty == 0:
+                # First purchase (base order) - use fill price as average
+                new_average_purchase_price = avg_fill_price
+            else:
+                # Weighted average: ((old_qty * old_price) + (new_qty * new_price)) / total_qty
+                total_cost = (current_avg_price * current_qty) + (avg_fill_price * filled_qty)
+                new_average_purchase_price = total_cost / current_total_qty
         else:
-            # Weighted average: (old_qty * old_price + new_qty * new_price) / total_qty
-            total_cost = (current_qty * current_avg_price) + (new_fill_qty * new_fill_price)
-            new_avg_price = total_cost / new_total_qty
+            # Fallback (shouldn't happen with valid data)
+            new_average_purchase_price = avg_fill_price
         
-        # Determine if this was a safety order (current_qty > 0 means we already had position)
-        is_safety_order = current_qty > 0
-        new_safety_orders = latest_cycle.safety_orders + (1 if is_safety_order else 0)
+        # Step 5: Determine if this was a safety order (Phase 7 logic)
+        is_safety_order = current_qty > Decimal('0')  # If we already had quantity, this is a safety order
         
-        # Step 5: Update the cycle in database
-        cycle_updates = {
-            'quantity': new_total_qty,
-            'average_purchase_price': new_avg_price,
-            'last_order_fill_price': new_fill_price,
-            'safety_orders': new_safety_orders,
-            'status': 'watching',  # Set to watching to look for take-profit opportunities
-            'latest_order_id': None  # Clear latest_order_id since order is now filled
+        # Step 6: Prepare updates dictionary (Phase 7 specification)
+        updates = {
+            'quantity': current_total_qty,
+            'average_purchase_price': new_average_purchase_price,
+            'last_order_fill_price': avg_fill_price,
+            'status': 'watching',
+            'latest_order_id': None  # Clear latest_order_id since order is filled
         }
         
-        update_success = update_cycle(latest_cycle.id, cycle_updates)
+        # Increment safety_orders count if this was a safety order (Phase 7 requirement)
+        if is_safety_order:
+            updates['safety_orders'] = latest_cycle.safety_orders + 1
+        
+        # Step 7: Update the cycle in database
+        update_success = update_cycle(latest_cycle.id, updates)
         
         if update_success:
+            final_safety_orders = latest_cycle.safety_orders + (1 if is_safety_order else 0)
+            
             logger.info(f"✅ Cycle database updated successfully for {symbol}:")
-            logger.info(f"   🔄 Total Quantity: {new_total_qty}")
-            logger.info(f"   💰 Avg Purchase Price: ${new_avg_price:.4f}")
-            logger.info(f"   📊 Last Fill Price: ${new_fill_price:.4f}")
-            logger.info(f"   🛡️ Safety Orders: {new_safety_orders}")
+            logger.info(f"   🔄 Total Quantity: {current_total_qty}")
+            logger.info(f"   💰 Avg Purchase Price: ${new_average_purchase_price:.4f}")
+            logger.info(f"   📊 Last Fill Price: ${avg_fill_price:.4f}")
+            logger.info(f"   🛡️ Safety Orders: {final_safety_orders}")
             logger.info(f"   📈 Order Type: {'Safety Order' if is_safety_order else 'Base Order'}")
             logger.info(f"   ⚡ Status: watching (ready for take-profit)")
         else:
@@ -813,6 +860,207 @@ async def update_cycle_on_buy_fill(order, trade_update):
             
     except Exception as e:
         logger.error(f"❌ Error updating cycle on BUY fill for {order.symbol}: {e}")
+        logger.exception("Full traceback:")
+
+
+async def update_cycle_on_sell_fill(order, trade_update):
+    """
+    Update dca_cycles table when a SELL order fills.
+    
+    This is Phase 8 functionality - processing take-profit order fills.
+    When a SELL order fills:
+    1. Mark current cycle as 'complete' with completed_at timestamp
+    2. Update dca_assets.last_sell_price with the fill price
+    3. Create new 'cooldown' cycle for the same asset
+    
+    Args:
+        order: The filled order object
+        trade_update: The trade update containing execution details
+    """
+    try:
+        symbol = order.symbol
+        order_id = order.id
+        
+        logger.info(f"🔄 Processing take-profit SELL fill for {symbol}...")
+        
+        # Step 1: Find the cycle by latest_order_id
+        cycle_query = """
+        SELECT id, asset_id, status, quantity, average_purchase_price, 
+               safety_orders, latest_order_id, last_order_fill_price,
+               completed_at, created_at, updated_at
+        FROM dca_cycles 
+        WHERE latest_order_id = %s
+        """
+        
+        cycle_result = execute_query(cycle_query, (str(order_id),), fetch_one=True)
+        if not cycle_result:
+            logger.error(f"❌ Cannot process SELL fill: No cycle found with latest_order_id={order_id} for {symbol}")
+            return
+        
+        # Convert to cycle object for easier access
+        from models.cycle_data import DcaCycle
+        current_cycle = DcaCycle.from_dict(cycle_result)
+        
+        # Step 2: Get the asset configuration 
+        asset_config = get_asset_config(symbol)
+        if not asset_config:
+            logger.error(f"❌ Cannot process SELL fill: No asset config found for {symbol}")
+            return
+        
+        # Step 3: Extract fill price from order
+        avg_fill_price = None
+        
+        # Use order.filled_avg_price as per Phase 8 specs
+        if hasattr(order, 'filled_avg_price') and order.filled_avg_price:
+            try:
+                avg_fill_price = Decimal(str(order.filled_avg_price))
+            except (ValueError, TypeError, decimal.InvalidOperation):
+                logger.error(f"❌ Cannot parse filled_avg_price from order: {order.filled_avg_price}")
+                return
+        
+        # Fallback to trade_update execution details if order fields not available
+        if avg_fill_price is None and hasattr(trade_update, 'price') and trade_update.price:
+            try:
+                avg_fill_price = Decimal(str(trade_update.price))
+                logger.info(f"Using trade_update price as fallback: ${avg_fill_price}")
+            except (ValueError, TypeError, decimal.InvalidOperation):
+                logger.warning(f"Could not parse price from trade_update: {trade_update.price}")
+        
+        # Final validation
+        if avg_fill_price is None:
+            logger.error(f"❌ Cannot process SELL fill: Missing fill price data")
+            return
+        
+        if avg_fill_price <= 0:
+            logger.error(f"❌ Invalid fill price: {avg_fill_price}")
+            return
+        
+        logger.info(f"💰 Take-profit SELL filled at ${avg_fill_price:.4f}")
+        
+        # Step 4: Update current cycle to 'complete' status
+        from datetime import datetime
+        from models.cycle_data import update_cycle
+        
+        updates_current = {
+            'status': 'complete',
+            'completed_at': datetime.utcnow(),
+            'latest_order_id': None
+        }
+        
+        update_success = update_cycle(current_cycle.id, updates_current)
+        if not update_success:
+            logger.error(f"❌ Failed to mark cycle {current_cycle.id} as complete")
+            return
+        
+        logger.info(f"✅ Cycle {current_cycle.id} marked as complete")
+        
+        # Step 5: Update dca_assets.last_sell_price
+        asset_update_success = update_asset_config(asset_config.id, {'last_sell_price': avg_fill_price})
+        if not asset_update_success:
+            logger.error(f"❌ Failed to update last_sell_price for asset {asset_config.id}")
+            return
+        
+        logger.info(f"✅ Updated {symbol} last_sell_price to ${avg_fill_price:.4f}")
+        
+        # Step 6: Create new 'cooldown' cycle
+        new_cooldown_cycle = create_cycle(
+            asset_id=asset_config.id,
+            status='cooldown',
+            quantity=Decimal('0'),
+            average_purchase_price=Decimal('0'),
+            safety_orders=0,
+            latest_order_id=None,
+            last_order_fill_price=None,
+            completed_at=None
+        )
+        
+        if not new_cooldown_cycle:
+            logger.error(f"❌ Failed to create new cooldown cycle for {symbol}")
+            return
+        
+        logger.info(f"✅ Created new cooldown cycle {new_cooldown_cycle.id} for {symbol}")
+        
+        # Step 7: Log completion summary
+        logger.info(f"🎉 TAKE-PROFIT COMPLETED for {symbol}:")
+        logger.info(f"   💰 Sell Price: ${avg_fill_price:.4f}")
+        logger.info(f"   📈 Avg Purchase Price: ${current_cycle.average_purchase_price:.4f}")
+        profit_amount = avg_fill_price - current_cycle.average_purchase_price
+        profit_percent = (profit_amount / current_cycle.average_purchase_price) * 100
+        logger.info(f"   💵 Profit per unit: ${profit_amount:.4f} ({profit_percent:.2f}%)")
+        logger.info(f"   🔄 Previous Cycle: {current_cycle.id} (complete)")
+        logger.info(f"   ❄️  New Cooldown Cycle: {new_cooldown_cycle.id}")
+        logger.info(f"   ⏱️  Cooldown Period: {asset_config.cooldown_period} seconds")
+        
+        logger.info(f"✅ Phase 8 SELL fill processing completed successfully for {symbol}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing SELL fill for {order.symbol}: {e}")
+        logger.exception("Full traceback:")
+
+
+async def update_cycle_on_order_cancellation(order, event):
+    """
+    Update dca_cycles table when an order is canceled, rejected, or expired.
+    
+    This is Phase 9 functionality - handling order lifecycle events that 
+    require reverting active cycles back to 'watching' status.
+    
+    Args:
+        order: The canceled/rejected/expired order object
+        event: The event type ('canceled', 'rejected', 'expired')
+    """
+    try:
+        symbol = order.symbol
+        order_id = order.id
+        
+        logger.info(f"🔄 Processing {event} order event for {symbol}...")
+        
+        # Step 1: Try to find the cycle linked to this order
+        cycle_query = """
+        SELECT id, asset_id, status, quantity, average_purchase_price, 
+               safety_orders, latest_order_id, last_order_fill_price,
+               completed_at, created_at, updated_at
+        FROM dca_cycles 
+        WHERE latest_order_id = %s
+        """
+        
+        cycle_result = execute_query(cycle_query, (str(order_id),), fetch_one=True)
+        
+        if not cycle_result:
+            # No cycle found - this is an orphan order (expected scenario)
+            logger.warning(f"⚠️ Received {event} for order {order_id} not actively tracked or already processed. "
+                          f"Ignoring DB update for this event.")
+            return
+        
+        # Convert to cycle object for easier access
+        from models.cycle_data import DcaCycle
+        cycle = DcaCycle.from_dict(cycle_result)
+        
+        # Step 2: Check if the cycle is in an active order state
+        if cycle.status not in ('buying', 'selling'):
+            logger.info(f"ℹ️ Order {order_id} for cycle {cycle.id} was {event}, but cycle status is '{cycle.status}' "
+                       f"(not 'buying' or 'selling'). No action needed.")
+            return
+        
+        # Step 3: Revert cycle to 'watching' and clear latest_order_id
+        from models.cycle_data import update_cycle
+        
+        updates = {
+            'status': 'watching',
+            'latest_order_id': None
+        }
+        
+        success = update_cycle(cycle.id, updates)
+        
+        if success:
+            logger.info(f"✅ Order {order_id} for cycle {cycle.id} was {event}. "
+                       f"Cycle status set to watching.")
+            logger.info(f"🔄 Cycle {cycle.id} ({symbol}) reverted to 'watching' status - ready for new orders")
+        else:
+            logger.error(f"❌ Failed to update cycle {cycle.id} after {event} order {order_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing {event} order event for {order.symbol}: {e}")
         logger.exception("Full traceback:")
 
 

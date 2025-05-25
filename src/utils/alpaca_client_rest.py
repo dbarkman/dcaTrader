@@ -18,7 +18,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
 from alpaca.data.historical import CryptoHistoricalDataClient
-from alpaca.data.requests import CryptoLatestTradeRequest
+from alpaca.data.requests import CryptoLatestTradeRequest, CryptoLatestQuoteRequest
 from alpaca.trading.models import TradeAccount, Order
 from alpaca.trading.models import Position
 
@@ -110,6 +110,49 @@ def get_latest_crypto_price(client: TradingClient, symbol: str) -> Optional[floa
             
     except Exception as e:
         logger.error(f"Error fetching latest crypto price for {symbol}: {e}")
+        return None
+
+
+def get_latest_crypto_quote(client: TradingClient, symbol: str) -> Optional[dict]:
+    """
+    Fetch the latest bid/ask quote for a crypto symbol
+    
+    Args:
+        client: Initialized TradingClient
+        symbol: Crypto symbol (e.g., 'BTC/USD')
+        
+    Returns:
+        Dictionary with 'bid' and 'ask' prices or None if error/no data
+    """
+    try:
+        # Use CryptoHistoricalDataClient for market data
+        api_key = os.getenv('APCA_API_KEY_ID')
+        api_secret = os.getenv('APCA_API_SECRET_KEY')
+        
+        crypto_client = CryptoHistoricalDataClient(
+            api_key=api_key,
+            secret_key=api_secret
+        )
+        
+        request = CryptoLatestQuoteRequest(symbol_or_symbols=symbol)
+        latest_quote = crypto_client.get_crypto_latest_quote(request)
+        
+        if symbol in latest_quote:
+            quote = latest_quote[symbol]
+            bid_price = float(quote.bid_price)
+            ask_price = float(quote.ask_price)
+            
+            logger.info(f"Latest quote for {symbol}: Bid ${bid_price} | Ask ${ask_price}")
+            return {
+                'bid': bid_price,
+                'ask': ask_price
+            }
+        else:
+            logger.warning(f"No quote data found for symbol: {symbol}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error fetching latest crypto quote for {symbol}: {e}")
         return None
 
 

@@ -206,7 +206,7 @@ async def test_on_trade_update_handler_basic(caplog):
     assert any('Status: FILLED' in msg for msg in log_messages)
     assert any('🎯 ORDER FILLED SUCCESSFULLY for BTC/USD!' in msg for msg in log_messages)
     assert any('🔄 Updating cycle database for BTC/USD BUY fill...' in msg for msg in log_messages)
-    assert any('❌ Cannot update cycle: No asset config found for BTC/USD' in msg for msg in log_messages)
+    assert any('❌ Cannot update cycle: No cycle found with latest_order_id=test_order_123 for BTC/USD' in msg for msg in log_messages)
 
 
 @pytest.mark.unit
