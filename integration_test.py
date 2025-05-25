@@ -3340,6 +3340,446 @@ def run_phase8_test():
     return asyncio.run(test_phase8_tradingstream_sell_fill_processing())
 
 
+def create_mock_order_cancellation_event(symbol, order_id, event_type='canceled'):
+    """Create a mock trade update event for an order cancellation/rejection/expiration."""
+    
+    # Create mock order object
+    mock_order = type('MockOrder', (), {
+        'id': order_id,
+        'symbol': symbol,
+        'side': 'buy',  # Could be buy or sell
+        'order_type': 'limit',
+        'time_in_force': 'gtc',
+        'filled_qty': '0',  # No fill for canceled orders
+        'filled_avg_price': None,
+        'qty': '0.01',  # Original order quantity
+        'limit_price': '50000.0',
+        'status': event_type  # canceled, rejected, or expired
+    })()
+    
+    # Create mock trade update event
+    mock_event = type('MockTradeUpdate', (), {
+        'event': event_type,  # 'canceled', 'rejected', or 'expired'
+        'order': mock_order,
+        'timestamp': datetime.now(),
+        'execution_id': f'exec_{order_id}_{event_type}'
+    })()
+    
+    return mock_event
+
+
+async def test_phase9_tradingstream_order_cancellation_handling():
+    """
+    Integration Test for Phase 9: TradingStream Order Cancellation/Rejection Handling
+    
+    This test uses simulated trade update events to verify that the TradingStream
+    handler correctly processes order cancellation/rejection/expiration events and:
+    - Reverts cycle status from 'buying'/'selling' to 'watching'
+    - Clears latest_order_id from the cycle
+    - Logs appropriate messages for tracked and untracked orders
+    - Handles orphan orders gracefully
+    
+    Scenarios tested:
+    1. Order cancellation for cycle in 'buying' status
+    2. Order cancellation for cycle in 'selling' status  
+    3. Order cancellation for unknown/orphan order (not tracked)
+    4. Order rejection handling
+    5. Order expiration handling
+    """
+    print("\n" + "="*80)
+    print("PHASE 9 INTEGRATION TEST: TradingStream Order Cancellation/Rejection Handling")
+    print("="*80)
+    print("TESTING: Simulated order cancellations and cycle status reversions...")
+    
+    test_asset_id = None
+    buying_cycle_id = None
+    selling_cycle_id = None
+    
+    try:
+        # SETUP: Database connection
+        print("\n1. 🔧 SETUP: Preparing test environment...")
+        if not check_connection():
+            print("❌ FAILED: Database connection test failed")
+            return False
+        print("✅ SUCCESS: Database connection established")
+        
+        # SETUP: Create test asset configuration
+        test_symbol = 'BTC/USD'
+        print(f"\n2. 🔧 SETUP: Creating test asset configuration for {test_symbol}...")
+        
+        insert_asset_query = """
+        INSERT INTO dca_assets (
+            asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+            max_safety_orders, safety_order_deviation, take_profit_percent,
+            cooldown_period, buy_order_price_deviation_percent
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        asset_params = (
+            test_symbol, True, Decimal('100.00'), Decimal('50.00'),
+            3, Decimal('2.0'), Decimal('1.5'), 300, Decimal('3.0')
+        )
+        
+        test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        print(f"✅ SUCCESS: Created test asset with ID {test_asset_id}")
+        
+        # TEST 1: Order Cancellation for 'buying' Cycle
+        print(f"\n" + "="*60)
+        print("TEST 1: ORDER CANCELLATION FOR 'BUYING' CYCLE")
+        print("="*60)
+        
+        # SETUP: Create cycle in 'buying' status with pending order
+        print(f"\n3. 🔧 SETUP: Creating cycle in 'buying' status...")
+        
+        buying_order_id = 'test_buying_order_cancel_123'
+        buying_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='buying',  # Order is pending
+            quantity=Decimal('0'),  # No position yet
+            average_purchase_price=Decimal('0'),
+            safety_orders=0,
+            latest_order_id=buying_order_id  # This order will be canceled
+        )
+        
+        if not buying_cycle:
+            print("❌ FAILED: Could not create buying cycle")
+            return False
+        
+        buying_cycle_id = buying_cycle.id
+        print(f"✅ SUCCESS: Created buying cycle:")
+        print(f"   Cycle ID: {buying_cycle_id}")
+        print(f"   Status: buying (order pending)")
+        print(f"   Latest Order ID: {buying_order_id}")
+        
+        # ACTION: Create mock cancellation event for buying order
+        print(f"\n4. 🎯 ACTION: Creating mock order cancellation event...")
+        
+        mock_cancel_event = create_mock_order_cancellation_event(
+            symbol=test_symbol,
+            order_id=buying_order_id,
+            event_type='canceled'
+        )
+        
+        print(f"   📊 Mock Cancellation Event:")
+        print(f"   📊 Event Type: {mock_cancel_event.event}")
+        print(f"   📊 Order ID: {mock_cancel_event.order.id}")
+        print(f"   📊 Symbol: {mock_cancel_event.order.symbol}")
+        print(f"   📊 Status: {mock_cancel_event.order.status}")
+        
+        # ACTION: Process the cancellation event
+        print(f"\n5. 🎯 ACTION: Processing order cancellation via on_trade_update()...")
+        
+        # Import and call the async handler
+        import sys
+        sys.path.insert(0, 'src')
+        from main_app import on_trade_update
+        
+        await on_trade_update(mock_cancel_event)
+        
+        # ASSERT: Verify cycle status reverted to 'watching'
+        print(f"\n6. ✅ ASSERT: Verifying buying cycle reverted to 'watching'...")
+        
+        updated_buying_cycle = get_latest_cycle(test_asset_id)
+        if not updated_buying_cycle:
+            print("❌ FAILED: Could not fetch updated buying cycle")
+            return False
+        
+        print(f"✅ SUCCESS: Buying cycle correctly updated after cancellation!")
+        print(f"   Cycle ID: {buying_cycle_id}")
+        print(f"   Status: {updated_buying_cycle.status} (expected: watching)")
+        print(f"   Latest Order ID: {updated_buying_cycle.latest_order_id} (expected: None)")
+        print(f"   Quantity: {updated_buying_cycle.quantity} (preserved)")
+        print(f"   Avg Price: {updated_buying_cycle.average_purchase_price} (preserved)")
+        
+        # Verify the updates
+        if (updated_buying_cycle.status != 'watching' or
+            updated_buying_cycle.latest_order_id is not None):
+            print("❌ FAILED: Buying cycle not properly reverted after cancellation")
+            print(f"   Status: {updated_buying_cycle.status} (expected: watching)")
+            print(f"   Latest Order ID: {updated_buying_cycle.latest_order_id} (expected: None)")
+            return False
+        
+        print("✅ SUCCESS: Buying cycle properly reverted to 'watching' status!")
+        
+        # TEST 2: Order Cancellation for 'selling' Cycle
+        print(f"\n" + "="*60)
+        print("TEST 2: ORDER CANCELLATION FOR 'SELLING' CYCLE")
+        print("="*60)
+        
+        # SETUP: Create cycle in 'selling' status with pending take-profit order
+        print(f"\n7. 🔧 SETUP: Creating cycle in 'selling' status...")
+        
+        selling_order_id = 'test_selling_order_cancel_456'
+        selling_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='selling',  # Take-profit order is pending
+            quantity=Decimal('0.01'),  # Has position
+            average_purchase_price=Decimal('95000.0'),
+            safety_orders=1,
+            latest_order_id=selling_order_id,  # This take-profit order will be canceled
+            last_order_fill_price=Decimal('94000.0')
+        )
+        
+        if not selling_cycle:
+            print("❌ FAILED: Could not create selling cycle")
+            return False
+        
+        selling_cycle_id = selling_cycle.id
+        print(f"✅ SUCCESS: Created selling cycle:")
+        print(f"   Cycle ID: {selling_cycle_id}")
+        print(f"   Status: selling (take-profit order pending)")
+        print(f"   Quantity: {selling_cycle.quantity} BTC")
+        print(f"   Latest Order ID: {selling_order_id}")
+        
+        # ACTION: Create mock cancellation event for selling order
+        print(f"\n8. 🎯 ACTION: Creating mock take-profit order cancellation...")
+        
+        mock_tp_cancel_event = create_mock_order_cancellation_event(
+            symbol=test_symbol,
+            order_id=selling_order_id,
+            event_type='canceled'
+        )
+        
+        # Update the mock to be a SELL order
+        mock_tp_cancel_event.order.side = 'sell'
+        
+        print(f"   📊 Mock Take-Profit Cancellation:")
+        print(f"   📊 Event Type: {mock_tp_cancel_event.event}")
+        print(f"   📊 Order ID: {mock_tp_cancel_event.order.id}")
+        print(f"   📊 Side: {mock_tp_cancel_event.order.side}")
+        
+        # ACTION: Process the take-profit cancellation
+        print(f"\n9. 🎯 ACTION: Processing take-profit cancellation via on_trade_update()...")
+        
+        await on_trade_update(mock_tp_cancel_event)
+        
+        # ASSERT: Verify selling cycle reverted to 'watching'
+        print(f"\n10. ✅ ASSERT: Verifying selling cycle reverted to 'watching'...")
+        
+        updated_selling_cycle = get_latest_cycle(test_asset_id)
+        if not updated_selling_cycle:
+            print("❌ FAILED: Could not fetch updated selling cycle")
+            return False
+        
+        print(f"✅ SUCCESS: Selling cycle correctly updated after cancellation!")
+        print(f"   Cycle ID: {selling_cycle_id}")
+        print(f"   Status: {updated_selling_cycle.status} (expected: watching)")
+        print(f"   Latest Order ID: {updated_selling_cycle.latest_order_id} (expected: None)")
+        print(f"   Quantity: {updated_selling_cycle.quantity} (preserved)")
+        print(f"   Safety Orders: {updated_selling_cycle.safety_orders} (preserved)")
+        
+        # Verify the updates
+        if (updated_selling_cycle.status != 'watching' or
+            updated_selling_cycle.latest_order_id is not None):
+            print("❌ FAILED: Selling cycle not properly reverted after cancellation")
+            return False
+        
+        print("✅ SUCCESS: Selling cycle properly reverted to 'watching' status!")
+        
+        # TEST 3: Order Cancellation for Unknown/Orphan Order
+        print(f"\n" + "="*60)
+        print("TEST 3: ORDER CANCELLATION FOR UNKNOWN/ORPHAN ORDER")
+        print("="*60)
+        
+        # ACTION: Create mock cancellation for order not tracked in any cycle
+        print(f"\n11. 🎯 ACTION: Creating mock cancellation for orphan order...")
+        
+        orphan_order_id = 'orphan_order_not_tracked_789'
+        mock_orphan_cancel = create_mock_order_cancellation_event(
+            symbol=test_symbol,
+            order_id=orphan_order_id,
+            event_type='canceled'
+        )
+        
+        print(f"   📊 Mock Orphan Order Cancellation:")
+        print(f"   📊 Order ID: {orphan_order_id} (not tracked in any cycle)")
+        print(f"   📊 Expected: Warning logged, no DB updates")
+        
+        # ACTION: Process the orphan cancellation
+        print(f"\n12. 🎯 ACTION: Processing orphan order cancellation...")
+        
+        await on_trade_update(mock_orphan_cancel)
+        
+        # ASSERT: Verify no unexpected changes to existing cycles
+        print(f"\n13. ✅ ASSERT: Verifying no unexpected changes to existing cycles...")
+        
+        final_cycle = get_latest_cycle(test_asset_id)
+        if (final_cycle.status != 'watching' or
+            final_cycle.latest_order_id is not None):
+            print("❌ FAILED: Orphan cancellation unexpectedly modified existing cycle")
+            return False
+        
+        print("✅ SUCCESS: Orphan order cancellation handled gracefully!")
+        print("   No unexpected database changes")
+        print("   Warning should be logged for untracked order")
+        
+        # TEST 4: Order Rejection Handling
+        print(f"\n" + "="*60)
+        print("TEST 4: ORDER REJECTION HANDLING")
+        print("="*60)
+        
+        # SETUP: Create another cycle for rejection testing
+        print(f"\n14. 🔧 SETUP: Creating cycle for rejection test...")
+        
+        rejected_order_id = 'test_rejected_order_999'
+        
+        # Update the existing cycle to have a new pending order
+        rejection_updates = {
+            'status': 'buying',
+            'latest_order_id': rejected_order_id
+        }
+        
+        update_success = update_cycle(selling_cycle_id, rejection_updates)
+        if not update_success:
+            print("❌ FAILED: Could not update cycle for rejection test")
+            return False
+        
+        print(f"✅ SUCCESS: Updated cycle for rejection test:")
+        print(f"   Cycle ID: {selling_cycle_id}")
+        print(f"   Status: buying (order pending)")
+        print(f"   Latest Order ID: {rejected_order_id}")
+        
+        # ACTION: Create mock rejection event
+        print(f"\n15. 🎯 ACTION: Creating mock order rejection event...")
+        
+        mock_rejection_event = create_mock_order_cancellation_event(
+            symbol=test_symbol,
+            order_id=rejected_order_id,
+            event_type='rejected'
+        )
+        
+        print(f"   📊 Mock Rejection Event:")
+        print(f"   📊 Event Type: {mock_rejection_event.event}")
+        print(f"   📊 Order ID: {rejected_order_id}")
+        
+        # ACTION: Process the rejection
+        print(f"\n16. 🎯 ACTION: Processing order rejection...")
+        
+        await on_trade_update(mock_rejection_event)
+        
+        # ASSERT: Verify cycle reverted after rejection
+        print(f"\n17. ✅ ASSERT: Verifying cycle reverted after rejection...")
+        
+        post_rejection_cycle = get_latest_cycle(test_asset_id)
+        if (post_rejection_cycle.status != 'watching' or
+            post_rejection_cycle.latest_order_id is not None):
+            print("❌ FAILED: Cycle not properly reverted after rejection")
+            return False
+        
+        print("✅ SUCCESS: Order rejection handled correctly!")
+        print("   Cycle status reverted to 'watching'")
+        print("   Latest order ID cleared")
+        
+        # TEST 5: Order Expiration Handling
+        print(f"\n" + "="*60)
+        print("TEST 5: ORDER EXPIRATION HANDLING")
+        print("="*60)
+        
+        # SETUP: Create cycle for expiration testing
+        print(f"\n18. 🔧 SETUP: Creating cycle for expiration test...")
+        
+        expired_order_id = 'test_expired_order_888'
+        
+        # Update cycle for expiration test
+        expiration_updates = {
+            'status': 'buying',
+            'latest_order_id': expired_order_id
+        }
+        
+        update_success = update_cycle(selling_cycle_id, expiration_updates)
+        if not update_success:
+            print("❌ FAILED: Could not update cycle for expiration test")
+            return False
+        
+        print(f"✅ SUCCESS: Updated cycle for expiration test:")
+        print(f"   Latest Order ID: {expired_order_id}")
+        
+        # ACTION: Create mock expiration event
+        print(f"\n19. 🎯 ACTION: Creating mock order expiration event...")
+        
+        mock_expiration_event = create_mock_order_cancellation_event(
+            symbol=test_symbol,
+            order_id=expired_order_id,
+            event_type='expired'
+        )
+        
+        print(f"   📊 Mock Expiration Event:")
+        print(f"   📊 Event Type: {mock_expiration_event.event}")
+        print(f"   📊 Order ID: {expired_order_id}")
+        
+        # ACTION: Process the expiration
+        print(f"\n20. 🎯 ACTION: Processing order expiration...")
+        
+        await on_trade_update(mock_expiration_event)
+        
+        # ASSERT: Verify cycle reverted after expiration
+        print(f"\n21. ✅ ASSERT: Verifying cycle reverted after expiration...")
+        
+        post_expiration_cycle = get_latest_cycle(test_asset_id)
+        if (post_expiration_cycle.status != 'watching' or
+            post_expiration_cycle.latest_order_id is not None):
+            print("❌ FAILED: Cycle not properly reverted after expiration")
+            return False
+        
+        print("✅ SUCCESS: Order expiration handled correctly!")
+        print("   Cycle status reverted to 'watching'")
+        print("   Latest order ID cleared")
+        
+        print(f"\n🎉 PHASE 9 INTEGRATION TEST COMPLETED SUCCESSFULLY!")
+        print("="*80)
+        print("PHASE 9 SUMMARY:")
+        print("✅ Order cancellation handling working correctly")
+        print("✅ Order rejection handling working correctly")
+        print("✅ Order expiration handling working correctly")
+        print("✅ Cycle status reversion ('buying'/'selling' → 'watching')")
+        print("✅ Latest order ID clearing working correctly")
+        print("✅ Orphan order handling working gracefully")
+        print("✅ Database state management correct")
+        print("🚀 Phase 9 TradingStream cancellation/rejection functionality is fully operational!")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ FAILED: Exception during Phase 9 test: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+        
+    finally:
+        # TEARDOWN: Clean up test resources
+        print(f"\n🧹 TEARDOWN: Cleaning up test resources...")
+        
+        # Delete test cycles
+        for cycle_id, cycle_name in [(buying_cycle_id, "buying"), (selling_cycle_id, "selling")]:
+            if cycle_id:
+                try:
+                    delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
+                    execute_query(delete_cycle_query, (cycle_id,), commit=True)
+                    print(f"   ✅ Deleted {cycle_name} cycle {cycle_id}")
+                except Exception as e:
+                    print(f"   ⚠️ Error deleting {cycle_name} cycle: {e}")
+        
+        # Delete test asset
+        if test_asset_id:
+            try:
+                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
+                execute_query(delete_asset_query, (test_asset_id,), commit=True)
+                print(f"   ✅ Deleted test asset {test_asset_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting asset: {e}")
+        
+        print("   ✅ Teardown completed")
+
+
+def run_phase9_test():
+    """Wrapper function to run the async Phase 9 test."""
+    import asyncio
+    return asyncio.run(test_phase9_tradingstream_order_cancellation_handling())
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -3424,6 +3864,15 @@ def main():
                 print("\n🎉 Phase 8: ✅ PASSED")
             else:
                 print("\n❌ Phase 8: ❌ FAILED")
+                sys.exit(1)
+            return
+        elif phase_arg == 'phase9':
+            print("\n🎯 Running ONLY Phase 9 tests...")
+            phase9_success = run_phase9_test()
+            if phase9_success:
+                print("\n🎉 Phase 9: ✅ PASSED")
+            else:
+                print("\n❌ Phase 9: ❌ FAILED")
                 sys.exit(1)
             return
         elif phase_arg == 'simulated':
@@ -3515,6 +3964,7 @@ def main():
     phase6_success = False
     phase7_success = False
     phase8_success = False
+    phase9_success = False
     
     # Run Phase 1 tests
     print("\nRunning Phase 1 tests...")
@@ -3548,6 +3998,10 @@ def main():
     print("\nRunning Phase 8 tests...")
     phase8_success = run_phase8_test()
     
+    # Run Phase 9 tests (TradingStream order cancellation/rejection handling)
+    print("\nRunning Phase 9 tests...")
+    phase9_success = run_phase9_test()
+    
     # Final results
     print("\n" + "="*60)
     print("INTEGRATION TEST RESULTS SUMMARY")
@@ -3561,8 +4015,9 @@ def main():
     print(f"Phase 6 (Take-Profit Logic): {'✅ PASSED' if phase6_success else '❌ FAILED'}")
     print(f"Phase 7 (TradingStream BUY Order Fill Processing): {'✅ PASSED' if phase7_success else '❌ FAILED'}")
     print(f"Phase 8 (TradingStream SELL Order Fill Processing): {'✅ PASSED' if phase8_success else '❌ FAILED'}")
+    print(f"Phase 9 (TradingStream Order Cancellation/Rejection Handling): {'✅ PASSED' if phase9_success else '❌ FAILED'}")
     
-    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success]):
+    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success, phase9_success]):
         print("\n🎉 ALL PHASES PASSED!")
         print("The DCA Trading Bot is fully functional and ready for production!")
     else:
@@ -3583,6 +4038,7 @@ def print_help():
     print("  python integration_test.py phase6          # Run only Phase 6 (Take-Profit Logic)")
     print("  python integration_test.py phase7          # Run only Phase 7 (TradingStream BUY Order Fill Processing)")
     print("  python integration_test.py phase8          # Run only Phase 8 (TradingStream SELL Order Fill Processing)")
+    print("  python integration_test.py phase9          # Run only Phase 9 (TradingStream Order Cancellation/Rejection Handling)")
     print("  python integration_test.py simulated       # Run all simulated WebSocket handler tests")
     print("  python integration_test.py sim-base        # Run simulated base order placement test")
     print("  python integration_test.py sim-safety      # Run simulated safety order placement test")
@@ -3599,6 +4055,7 @@ def print_help():
     print("  Phase 6: Tests take-profit order placement logic (market SELL orders)")
     print("  Phase 7: Tests TradingStream BUY order fill processing logic")
     print("  Phase 8: Tests TradingStream SELL order fill processing logic")
+    print("  Phase 9: Tests TradingStream order cancellation/rejection/expiration handling")
     print("\nSIMULATED TEST DESCRIPTIONS:")
     print("  simulated: Run all simulated WebSocket handler tests (fast, no waiting)")
     print("  sim-base: Test MarketDataStream base order placement with mock quote")
