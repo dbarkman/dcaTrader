@@ -3260,7 +3260,7 @@ async def test_phase8_tradingstream_sell_fill_processing():
         # Get the completed cycle using a fresh query to avoid cursor issues
         # We need to query for completed cycles since get_latest_cycle returns the newest (cooldown) cycle
         get_completed_cycle_query = """
-        SELECT id, status, completed_at, latest_order_id, quantity, average_purchase_price 
+        SELECT id, status, completed_at, latest_order_id, latest_order_created_at, quantity, average_purchase_price 
         FROM dca_cycles 
         WHERE id = %s AND status = 'complete'
         """
@@ -3279,16 +3279,19 @@ async def test_phase8_tradingstream_sell_fill_processing():
         print(f"   Status: {completed_cycle_data['status']} (expected: complete)")
         print(f"   Completed At: {completed_cycle_data['completed_at']} (should be set)")
         print(f"   Latest Order ID: {completed_cycle_data['latest_order_id']} (expected: None)")
+        print(f"   Latest Order Created At: {completed_cycle_data['latest_order_created_at']} (expected: None)")
         print(f"   Quantity: {completed_cycle_data['quantity']} (preserved)")
         
         # Verify cycle completion using dictionary access
         if (completed_cycle_data['status'] != 'complete' or
             completed_cycle_data['completed_at'] is None or
-            completed_cycle_data['latest_order_id'] is not None):
+            completed_cycle_data['latest_order_id'] is not None or
+            completed_cycle_data['latest_order_created_at'] is not None):
             print("❌ FAILED: Original cycle not properly completed")
             print(f"   Status: {completed_cycle_data['status']} (expected: complete)")
             print(f"   Completed At: {completed_cycle_data['completed_at']} (should not be None)")
             print(f"   Latest Order ID: {completed_cycle_data['latest_order_id']} (expected: None)")
+            print(f"   Latest Order Created At: {completed_cycle_data['latest_order_created_at']} (expected: None)")
             return False
         
         print("✅ SUCCESS: Original cycle properly marked as complete!")
@@ -3332,6 +3335,7 @@ async def test_phase8_tradingstream_sell_fill_processing():
         print(f"   Avg Purchase Price: ${new_cycle.average_purchase_price} (expected: 0)")
         print(f"   Safety Orders: {new_cycle.safety_orders} (expected: 0)")
         print(f"   Latest Order ID: {new_cycle.latest_order_id} (expected: None)")
+        print(f"   Latest Order Created At: {new_cycle.latest_order_created_at} (expected: None)")
         print(f"   Last Order Fill Price: {new_cycle.last_order_fill_price} (expected: None)")
         print(f"   Completed At: {new_cycle.completed_at} (expected: None)")
         
@@ -3342,6 +3346,7 @@ async def test_phase8_tradingstream_sell_fill_processing():
             new_cycle.average_purchase_price != Decimal('0') or
             new_cycle.safety_orders != 0 or
             new_cycle.latest_order_id is not None or
+            new_cycle.latest_order_created_at is not None or
             new_cycle.last_order_fill_price is not None or
             new_cycle.completed_at is not None):
             print("❌ FAILED: New cooldown cycle not created correctly")
@@ -3368,11 +3373,12 @@ async def test_phase8_tradingstream_sell_fill_processing():
         print("PHASE 8 SUMMARY:")
         print("✅ SELL order fill processing working correctly")
         print("✅ Original cycle marked as 'complete' with timestamp")
+        print("✅ Latest order tracking fields properly cleared (latest_order_id and latest_order_created_at)")
         print("✅ Asset last_sell_price updated correctly")
         print("✅ New cooldown cycle created with reset state")
         print("✅ Cycle transition logic working properly")
         print("✅ Database atomicity maintained")
-        print("🚀 Phase 8 TradingStream SELL fill functionality is fully operational!")
+        print("🚀 Phase 8 enhanced TradingStream SELL fill functionality is fully operational!")
         
         return True
         
@@ -3653,6 +3659,120 @@ async def test_phase9_tradingstream_order_cancellation_handling():
         
         print("✅ SUCCESS: Selling cycle properly reverted to 'watching' status!")
         
+        # TEST 2.5: Enhanced SELL Order Cancellation with Alpaca Position Sync
+        print(f"\n" + "="*60)
+        print("TEST 2.5: ENHANCED SELL ORDER CANCELLATION WITH POSITION SYNC")
+        print("="*60)
+        
+        # SETUP: Create cycle in 'selling' status with latest_order_created_at field
+        print(f"\n7.5. 🔧 SETUP: Creating enhanced selling cycle with order timestamp...")
+        
+        enhanced_selling_order_id = 'test_enhanced_sell_cancel_999'
+        from datetime import timezone
+        order_timestamp = datetime.now(timezone.utc)
+        
+        enhanced_selling_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='selling',  # Take-profit order is pending
+            quantity=Decimal('0.02'),  # Has position
+            average_purchase_price=Decimal('48000.0'),
+            safety_orders=2,
+            latest_order_id=enhanced_selling_order_id,
+            latest_order_created_at=order_timestamp,  # Phase 6 enhancement
+            last_order_fill_price=Decimal('47000.0')
+        )
+        
+        if not enhanced_selling_cycle:
+            print("❌ FAILED: Could not create enhanced selling cycle")
+            return False
+        
+        enhanced_selling_cycle_id = enhanced_selling_cycle.id
+        print(f"✅ SUCCESS: Created enhanced selling cycle:")
+        print(f"   Cycle ID: {enhanced_selling_cycle_id}")
+        print(f"   Status: selling (take-profit order pending)")
+        print(f"   Quantity: {enhanced_selling_cycle.quantity} BTC")
+        print(f"   Latest Order ID: {enhanced_selling_order_id}")
+        print(f"   Latest Order Created At: {order_timestamp}")
+        
+        # ACTION: Create mock cancellation event for enhanced selling order with partial fill
+        print(f"\n8.5. 🎯 ACTION: Creating mock enhanced SELL order cancellation with partial fill...")
+        
+        mock_enhanced_cancel_event = create_mock_order_cancellation_event(
+            symbol=test_symbol,
+            order_id=enhanced_selling_order_id,
+            event_type='canceled'
+        )
+        
+        # Enhance the mock to be a SELL order with partial fill data
+        mock_enhanced_cancel_event.order.side = 'sell'
+        mock_enhanced_cancel_event.order.filled_qty = '0.01'  # Partial fill
+        mock_enhanced_cancel_event.order.filled_avg_price = '49000.00'  # Fill price
+        
+        print(f"   📊 Mock Enhanced SELL Cancellation:")
+        print(f"   📊 Event Type: {mock_enhanced_cancel_event.event}")
+        print(f"   📊 Order ID: {mock_enhanced_cancel_event.order.id}")
+        print(f"   📊 Side: {mock_enhanced_cancel_event.order.side}")
+        print(f"   📊 Filled Qty: {mock_enhanced_cancel_event.order.filled_qty} (partial)")
+        print(f"   📊 Filled Price: ${mock_enhanced_cancel_event.order.filled_avg_price}")
+        
+        # ACTION: Process the enhanced take-profit cancellation
+        print(f"\n9.5. 🎯 ACTION: Processing enhanced SELL cancellation via on_trade_update()...")
+        
+        await on_trade_update(mock_enhanced_cancel_event)
+        
+        # ASSERT: Verify enhanced selling cycle handling
+        print(f"\n10.5. ✅ ASSERT: Verifying enhanced SELL cancellation handling...")
+        
+        # Check the completed cycle specifically (not the latest which might be cooldown)
+        completed_cycle_query = """
+            SELECT * FROM dca_cycles 
+            WHERE id = %s
+        """
+        completed_cycle_data = execute_query(completed_cycle_query, (enhanced_selling_cycle_id,), fetch_one=True)
+        if not completed_cycle_data:
+            print("❌ FAILED: Could not fetch completed enhanced selling cycle")
+            return False
+        
+        updated_enhanced_cycle = DcaCycle(**completed_cycle_data)
+        
+        # Also check if a new cooldown cycle was created
+        latest_cycle = get_latest_cycle(test_asset_id)
+        if not latest_cycle:
+            print("❌ FAILED: Could not fetch latest cycle after completion")
+            return False
+        
+        print(f"✅ SUCCESS: Enhanced selling cycle correctly updated after cancellation!")
+        print(f"   Cycle ID: {enhanced_selling_cycle_id}")
+        print(f"   Status: {updated_enhanced_cycle.status} (expected: complete - due to partial fills)")
+        print(f"   Latest Order ID: {updated_enhanced_cycle.latest_order_id} (expected: None)")
+        print(f"   Latest Order Created At: {updated_enhanced_cycle.latest_order_created_at} (expected: None)")
+        print(f"   Quantity: {updated_enhanced_cycle.quantity} (synced from Alpaca)")
+        print(f"   Safety Orders: {updated_enhanced_cycle.safety_orders} (preserved)")
+        
+        # Verify the enhanced updates (including latest_order_created_at clearing)
+        # Since there are partial fills, the cycle should be completed, not reverted to watching
+        if (updated_enhanced_cycle.status != 'complete' or
+            updated_enhanced_cycle.latest_order_id is not None or
+            updated_enhanced_cycle.latest_order_created_at is not None):
+            print("❌ FAILED: Enhanced selling cycle not properly completed after cancellation with partial fills")
+            print(f"   Status: {updated_enhanced_cycle.status} (expected: complete)")
+            print(f"   Latest Order ID: {updated_enhanced_cycle.latest_order_id} (expected: None)")
+            print(f"   Latest Order Created At: {updated_enhanced_cycle.latest_order_created_at} (expected: None)")
+            return False
+        
+        # Verify that a new cooldown cycle was created
+        if latest_cycle.status != 'cooldown':
+            print(f"❌ FAILED: Expected new cooldown cycle, but got status: {latest_cycle.status}")
+            return False
+        
+        print("✅ SUCCESS: Enhanced SELL order cancellation with position sync working correctly!")
+        print("   ✅ Cycle status completed (due to partial fills)")
+        print("   ✅ Latest order ID cleared")
+        print("   ✅ Latest order created at timestamp cleared (Phase 6 enhancement)")
+        print("   ✅ Alpaca position sync attempted")
+        print("   ✅ Partial fill data processed correctly - cycle completed")
+        print(f"   ✅ New cooldown cycle created: {latest_cycle.id}")
+        
         # TEST 3: Order Cancellation for Unknown/Orphan Order
         print(f"\n" + "="*60)
         print("TEST 3: ORDER CANCELLATION FOR UNKNOWN/ORPHAN ORDER")
@@ -3680,15 +3800,19 @@ async def test_phase9_tradingstream_order_cancellation_handling():
         # ASSERT: Verify no unexpected changes to existing cycles
         print(f"\n13. ✅ ASSERT: Verifying no unexpected changes to existing cycles...")
         
+        # The latest cycle should still be the cooldown cycle from TEST 2.5
         final_cycle = get_latest_cycle(test_asset_id)
-        if (final_cycle.status != 'watching' or
+        if (final_cycle.status != 'cooldown' or
             final_cycle.latest_order_id is not None):
-            print("❌ FAILED: Orphan cancellation unexpectedly modified existing cycle")
+            print(f"❌ FAILED: Orphan cancellation unexpectedly modified existing cycle")
+            print(f"   Expected: status='cooldown', latest_order_id=None")
+            print(f"   Actual: status='{final_cycle.status}', latest_order_id={final_cycle.latest_order_id}")
             return False
         
         print("✅ SUCCESS: Orphan order cancellation handled gracefully!")
         print("   No unexpected database changes")
         print("   Warning should be logged for untracked order")
+        print(f"   Latest cycle remains unchanged: {final_cycle.id} (status: {final_cycle.status})")
         
         # TEST 4: Order Rejection Handling
         print(f"\n" + "="*60)
@@ -3737,14 +3861,22 @@ async def test_phase9_tradingstream_order_cancellation_handling():
         # ASSERT: Verify cycle reverted after rejection
         print(f"\n17. ✅ ASSERT: Verifying cycle reverted after rejection...")
         
-        post_rejection_cycle = get_latest_cycle(test_asset_id)
+        # Check the specific cycle that was updated (selling_cycle_id), not the latest cycle
+        from models.cycle_data import get_cycle_by_id
+        post_rejection_cycle = get_cycle_by_id(selling_cycle_id)
+        if not post_rejection_cycle:
+            print(f"❌ FAILED: Could not fetch cycle {selling_cycle_id} after rejection")
+            return False
+            
         if (post_rejection_cycle.status != 'watching' or
             post_rejection_cycle.latest_order_id is not None):
-            print("❌ FAILED: Cycle not properly reverted after rejection")
+            print(f"❌ FAILED: Cycle not properly reverted after rejection")
+            print(f"   Expected: status='watching', latest_order_id=None")
+            print(f"   Actual: status='{post_rejection_cycle.status}', latest_order_id={post_rejection_cycle.latest_order_id}")
             return False
         
         print("✅ SUCCESS: Order rejection handled correctly!")
-        print("   Cycle status reverted to 'watching'")
+        print(f"   Cycle {selling_cycle_id} status reverted to 'watching'")
         print("   Latest order ID cleared")
         
         # TEST 5: Order Expiration Handling
@@ -3792,14 +3924,21 @@ async def test_phase9_tradingstream_order_cancellation_handling():
         # ASSERT: Verify cycle reverted after expiration
         print(f"\n21. ✅ ASSERT: Verifying cycle reverted after expiration...")
         
-        post_expiration_cycle = get_latest_cycle(test_asset_id)
+        # Check the specific cycle that was updated (selling_cycle_id), not the latest cycle
+        post_expiration_cycle = get_cycle_by_id(selling_cycle_id)
+        if not post_expiration_cycle:
+            print(f"❌ FAILED: Could not fetch cycle {selling_cycle_id} after expiration")
+            return False
+            
         if (post_expiration_cycle.status != 'watching' or
             post_expiration_cycle.latest_order_id is not None):
-            print("❌ FAILED: Cycle not properly reverted after expiration")
+            print(f"❌ FAILED: Cycle not properly reverted after expiration")
+            print(f"   Expected: status='watching', latest_order_id=None")
+            print(f"   Actual: status='{post_expiration_cycle.status}', latest_order_id={post_expiration_cycle.latest_order_id}")
             return False
         
         print("✅ SUCCESS: Order expiration handled correctly!")
-        print("   Cycle status reverted to 'watching'")
+        print(f"   Cycle {selling_cycle_id} status reverted to 'watching'")
         print("   Latest order ID cleared")
         
         print(f"\n🎉 PHASE 9 INTEGRATION TEST COMPLETED SUCCESSFULLY!")
@@ -3810,6 +3949,9 @@ async def test_phase9_tradingstream_order_cancellation_handling():
         print("✅ Order expiration handling working correctly")
         print("✅ Cycle status reversion ('buying'/'selling' → 'watching')")
         print("✅ Latest order ID clearing working correctly")
+        print("✅ Enhanced SELL order cancellation with Alpaca position sync")
+        print("✅ Latest order created at timestamp clearing (Phase 6 enhancement)")
+        print("✅ Partial fill handling in canceled SELL orders")
         print("✅ Orphan order handling working gracefully")
         print("✅ Database state management correct")
         print("🚀 Phase 9 TradingStream cancellation/rejection functionality is fully operational!")

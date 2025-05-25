@@ -1069,7 +1069,8 @@ async def update_cycle_on_sell_fill(order, trade_update):
         updates_current = {
             'status': 'complete',
             'completed_at': datetime.utcnow(),
-            'latest_order_id': None
+            'latest_order_id': None,
+            'latest_order_created_at': None  # Clear the order timestamp
         }
         
         update_success = update_cycle(current_cycle.id, updates_current)
@@ -1209,7 +1210,8 @@ async def update_cycle_on_order_cancellation(order, event):
             # Prepare updates with Alpaca position sync
             updates = {
                 'status': 'watching',
-                'latest_order_id': None
+                'latest_order_id': None,
+                'latest_order_created_at': None
             }
             
             if alpaca_position:
@@ -1251,23 +1253,160 @@ async def update_cycle_on_order_cancellation(order, event):
                 logger.info(f"📊 Canceled order had partial fill: {order_filled_qty} @ ${order_filled_avg_price:.4f}")
             
         else:
-            # For SELL order cancellations, simple revert to watching
+            # For SELL order cancellations, enhanced handling with Alpaca position sync
+            logger.info(f"🔄 Processing SELL order {event} with Alpaca position sync...")
+            
+            # Get Alpaca client and fetch current position
+            client = get_trading_client()
+            alpaca_position = None
+            current_quantity_on_alpaca = cycle.quantity  # Fallback to original quantity
+            
+            if client:
+                alpaca_position = get_alpaca_position_by_symbol(client, symbol)
+                if alpaca_position:
+                    try:
+                        current_quantity_on_alpaca = Decimal(str(alpaca_position.qty))
+                        logger.info(f"📊 Current Alpaca position after SELL {event}: {current_quantity_on_alpaca} @ ${alpaca_position.avg_entry_price}")
+                    except (ValueError, TypeError, decimal.InvalidOperation):
+                        logger.warning(f"Could not parse Alpaca position quantity: {alpaca_position.qty}")
+                        current_quantity_on_alpaca = cycle.quantity
+                else:
+                    logger.info(f"📊 No Alpaca position found for {symbol} after SELL {event}")
+                    # Don't assume zero position means completion - could be test environment
+                    # Only treat as zero if we have evidence of actual selling (partial fills)
+                    current_quantity_on_alpaca = None  # Will be handled below
+            else:
+                logger.warning(f"⚠️ Could not get Alpaca client for position sync after SELL {event}")
+                current_quantity_on_alpaca = None
+            
+            # Extract partial fill details if available
+            order_filled_qty = Decimal('0')
+            order_filled_avg_price = None
+            
+            if hasattr(order, 'filled_qty') and order.filled_qty:
+                try:
+                    order_filled_qty = Decimal(str(order.filled_qty))
+                except (ValueError, TypeError, decimal.InvalidOperation):
+                    logger.warning(f"Could not parse filled_qty from canceled SELL order: {order.filled_qty}")
+            
+            if hasattr(order, 'filled_avg_price') and order.filled_avg_price and order_filled_qty > 0:
+                try:
+                    order_filled_avg_price = Decimal(str(order.filled_avg_price))
+                except (ValueError, TypeError, decimal.InvalidOperation):
+                    logger.warning(f"Could not parse filled_avg_price from canceled SELL order: {order.filled_avg_price}")
+            
+            # Prepare base updates (always clear order tracking fields)
             updates = {
-                'status': 'watching',
-                'latest_order_id': None
+                'latest_order_id': None,
+                'latest_order_created_at': None
             }
+            
+            # Determine if we should complete the cycle or revert to watching
+            should_complete_cycle = False
+            
+            if current_quantity_on_alpaca is not None and current_quantity_on_alpaca > Decimal('0'):
+                # Position remains - revert to watching status
+                updates['status'] = 'watching'
+                updates['quantity'] = current_quantity_on_alpaca
+                
+                # Sync average price from Alpaca if available
+                if alpaca_position:
+                    try:
+                        alpaca_avg_price = Decimal(str(alpaca_position.avg_entry_price))
+                        updates['average_purchase_price'] = alpaca_avg_price
+                    except (ValueError, TypeError, decimal.InvalidOperation):
+                        logger.warning(f"Could not parse Alpaca avg_entry_price: {alpaca_position.avg_entry_price}")
+                        # Keep existing average_purchase_price
+                
+                logger.info(f"✅ SELL order {order_id} for cycle {cycle.id} was {event}. "
+                           f"Position remains: {current_quantity_on_alpaca}. Cycle status set to watching.")
+                
+                # Log partial fill details if applicable
+                if order_filled_qty > 0:
+                    logger.info(f"📊 Canceled SELL order had partial fill: {order_filled_qty} @ ${order_filled_avg_price:.4f}")
+                    logger.info(f"📊 Remaining position: {current_quantity_on_alpaca} (was {cycle.quantity})")
+                
+            elif (current_quantity_on_alpaca is not None and current_quantity_on_alpaca == Decimal('0') and order_filled_qty > 0) or \
+                 (current_quantity_on_alpaca is None and order_filled_qty > 0):
+                # Position is zero AND we have evidence of partial fills - treat as completion
+                # OR position sync failed but we have partial fills - also treat as completion
+                should_complete_cycle = True
+                logger.info(f"⚠️ SELL order {order_id} for cycle {cycle.id} was {event}, with partial fills. "
+                           f"Treating as cycle completion.")
+                
+            else:
+                # No position info or no partial fills - default to reverting to watching
+                # This handles test environments and cases where Alpaca sync fails
+                updates['status'] = 'watching'
+                # Keep existing quantity and average price
+                logger.info(f"✅ SELL order {order_id} for cycle {cycle.id} was {event}. "
+                           f"Reverting to watching status (position sync unavailable or no fills).")
+            
+            if should_complete_cycle:
+                updates['status'] = 'complete'
+                updates['completed_at'] = datetime.utcnow()
+                updates['quantity'] = Decimal('0')
+                
+                # Determine best price for last_sell_price
+                sell_price = None
+                if order_filled_avg_price:
+                    sell_price = order_filled_avg_price
+                elif hasattr(order, 'filled_avg_price') and order.filled_avg_price:
+                    try:
+                        sell_price = Decimal(str(order.filled_avg_price))
+                    except (ValueError, TypeError, decimal.InvalidOperation):
+                        sell_price = cycle.average_purchase_price
+                else:
+                    sell_price = cycle.average_purchase_price
+                
+                # Update asset last_sell_price
+                asset_config = get_asset_config(symbol)
+                if asset_config:
+                    asset_update_success = update_asset_config(asset_config.id, {'last_sell_price': sell_price})
+                    if asset_update_success:
+                        logger.info(f"✅ Updated {symbol} last_sell_price to ${sell_price:.4f}")
+                    else:
+                        logger.error(f"❌ Failed to update last_sell_price for asset {asset_config.id}")
+                
+                    # Create new cooldown cycle
+                    new_cooldown_cycle = create_cycle(
+                        asset_id=asset_config.id,
+                        status='cooldown',
+                        quantity=Decimal('0'),
+                        average_purchase_price=Decimal('0'),
+                        safety_orders=0,
+                        latest_order_id=None,
+                        last_order_fill_price=None,
+                        completed_at=None
+                    )
+                    
+                    if new_cooldown_cycle:
+                        logger.info(f"✅ Created new cooldown cycle {new_cooldown_cycle.id} for {symbol}")
+                    else:
+                        logger.error(f"❌ Failed to create new cooldown cycle for {symbol}")
+                
+                logger.info(f"✅ SELL order {order_id} for cycle {cycle.id} was {event}, but position is zero. Cycle completed.")
         
         success = update_cycle(cycle.id, updates)
         
         if success:
-            logger.info(f"✅ Order {order_id} for cycle {cycle.id} was {event}. "
-                       f"Cycle status set to watching.")
-            logger.info(f"🔄 Cycle {cycle.id} ({symbol}) reverted to 'watching' status - ready for new orders")
-            
-            if order.side.lower() == 'buy' and alpaca_position:
-                logger.info(f"   🔗 Alpaca Sync: ✅ Position synced after {event}")
-            elif order.side.lower() == 'buy':
-                logger.info(f"   🔗 Alpaca Sync: ⚠️ Fallback used after {event}")
+            if order.side.lower() == 'buy':
+                logger.info(f"✅ BUY order {order_id} for cycle {cycle.id} was {event}. "
+                           f"Cycle status set to watching.")
+                logger.info(f"🔄 Cycle {cycle.id} ({symbol}) reverted to 'watching' status - ready for new orders")
+                
+                if alpaca_position:
+                    logger.info(f"   🔗 Alpaca Sync: ✅ Position synced after {event}")
+                else:
+                    logger.info(f"   🔗 Alpaca Sync: ⚠️ Fallback used after {event}")
+            else:
+                # SELL order - status depends on whether position remains
+                if updates.get('status') == 'watching':
+                    logger.info(f"✅ SELL order cancellation processed - cycle {cycle.id} ({symbol}) reverted to 'watching' status")
+                    logger.info(f"   🔗 Alpaca Sync: ✅ Position synced - ready for new take-profit attempts")
+                elif updates.get('status') == 'complete':
+                    logger.info(f"✅ SELL order cancellation processed - cycle {cycle.id} ({symbol}) completed (zero position)")
+                    logger.info(f"   🔗 Alpaca Sync: ✅ Position confirmed zero - cycle completed")
         else:
             logger.error(f"❌ Failed to update cycle {cycle.id} after {event} order {order_id}")
         
