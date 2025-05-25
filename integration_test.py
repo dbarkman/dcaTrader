@@ -34,7 +34,8 @@ from utils.alpaca_client_rest import (
     place_limit_buy_order,
     get_open_orders,
     cancel_order,
-    get_positions
+    get_positions,
+    place_market_sell_order
 )
 
 # Import test utilities for mocking WebSocket events
@@ -62,6 +63,231 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def robust_alpaca_teardown(test_symbols=None, timeout_seconds=5):
+    """
+    Comprehensive teardown function that cancels ALL orders and liquidates ALL positions.
+    
+    This function ensures a completely clean Alpaca paper trading account state
+    by always cleaning ALL orders and positions regardless of origin.
+    
+    Args:
+        test_symbols: Ignored - always cleans ALL orders and positions
+        timeout_seconds: Maximum time to wait for cleanup completion (default: 5)
+    
+    Returns:
+        bool: True if cleanup successful, False if failed
+    """
+    print(f"\n🧹 TEARDOWN: Cleaning Alpaca paper account...")
+    print("   ℹ️ Cancelling ALL orders and liquidating ALL positions")
+    
+    try:
+        # Initialize Alpaca client
+        client = get_trading_client()
+        if not client:
+            print("❌ TEARDOWN FAILED: Could not initialize Alpaca client")
+            return False
+        
+        start_time = time.time()
+        
+        # Step 1: Cancel ALL open orders
+        print("   📋 Step 1: Cancelling ALL open orders...")
+        initial_orders = get_open_orders(client)
+        print(f"   Found {len(initial_orders)} orders to cancel")
+        
+        # Cancel each order
+        for order in initial_orders:
+            try:
+                success = cancel_order(client, order.id)
+                if success:
+                    print(f"   ✅ Cancelled order {order.id} ({order.symbol})")
+                else:
+                    print(f"   ⚠️ Could not cancel order {order.id} ({order.symbol})")
+            except Exception as e:
+                print(f"   ⚠️ Error cancelling order {order.id}: {e}")
+        
+        # Step 2: Liquidate ALL positions
+        print("   💰 Step 2: Liquidating ALL positions...")
+        initial_positions = get_positions(client)
+        print(f"   Found {len(initial_positions)} positions to liquidate")
+        
+        if len(initial_positions) > 0:
+            print("   📋 Positions found:")
+            for pos in initial_positions:
+                print(f"      • {pos.symbol}: {pos.qty} (${float(pos.market_value):.2f})")
+        
+        # Liquidate each position with market sell orders
+        for position in initial_positions:
+            try:
+                qty = float(position.qty)
+                if qty > 0:  # Only liquidate long positions
+                    print(f"   🔥 LIQUIDATING {position.symbol}: {qty} shares")
+                    
+                    # Place market sell order to liquidate
+                    sell_order = place_market_sell_order(
+                        client=client,
+                        symbol=position.symbol,
+                        qty=qty,
+                        time_in_force='ioc'  # Immediate or cancel for fast execution
+                    )
+                    if sell_order:
+                        print(f"   ✅ Liquidation order placed for {position.symbol}: {sell_order.id}")
+                    else:
+                        print(f"   ⚠️ Could not place liquidation order for {position.symbol}")
+                elif qty < 0:
+                    print(f"   ⚠️ Short position detected for {position.symbol}: {qty} (skipping)")
+                else:
+                    print(f"   ℹ️ Zero quantity position for {position.symbol} (skipping)")
+            except Exception as e:
+                print(f"   ❌ Error liquidating position {position.symbol}: {e}")
+        
+        # Step 3: Wait for cleanup completion and verify
+        print(f"   ⏱️ Step 3: Waiting up to {timeout_seconds}s for cleanup completion...")
+        
+        cleanup_complete = False
+        last_status_time = time.time()
+        
+        while time.time() - start_time < timeout_seconds:
+            time.sleep(0.5)  # Check every 500ms
+            
+            # Check if ALL orders and positions are gone
+            current_orders = get_open_orders(client)
+            current_positions = get_positions(client)
+            remaining_positions = [p for p in current_positions if float(p.qty) > 0]
+            
+            # Print status every 2 seconds
+            if time.time() - last_status_time >= 2.0:
+                print(f"   ⏳ Waiting... {len(current_orders)} orders, {len(remaining_positions)} positions remaining")
+                if remaining_positions:
+                    for pos in remaining_positions:
+                        print(f"      • Still holding: {pos.symbol} ({pos.qty})")
+                last_status_time = time.time()
+            
+            if len(current_orders) == 0 and len(remaining_positions) == 0:
+                cleanup_complete = True
+                break
+        
+        elapsed_time = time.time() - start_time
+        
+        if cleanup_complete:
+            print(f"   ✅ TEARDOWN SUCCESS: Cleanup completed in {elapsed_time:.1f}s")
+            print(f"      • All orders cancelled")
+            print(f"      • All positions liquidated")
+            return True
+        else:
+            # Final check of what's still remaining
+            final_orders = get_open_orders(client)
+            final_positions = get_positions(client)
+            remaining_positions = [p for p in final_positions if float(p.qty) > 0]
+            
+            print(f"   ❌ TEARDOWN FAILED: Cleanup incomplete after {timeout_seconds}s")
+            print(f"      • {len(final_orders)} orders still open:")
+            for order in final_orders:
+                print(f"        - {order.id} ({order.symbol}, {order.side}, {order.qty})")
+            print(f"      • {len(remaining_positions)} positions still open:")
+            for position in remaining_positions:
+                print(f"        - {position.symbol}: {position.qty} (${float(position.market_value):.2f})")
+            
+            return False
+            
+    except Exception as e:
+        print(f"   ❌ TEARDOWN ERROR: Exception during cleanup: {e}")
+        import traceback
+        print(f"   Traceback: {traceback.format_exc()}")
+        return False
+
+
+def cleanup_test_database_records(asset_ids=None, cycle_ids=None):
+    """
+    Clean up test records from the database.
+    
+    Args:
+        asset_ids: List of asset IDs to delete
+        cycle_ids: List of cycle IDs to delete
+    
+    Returns:
+        bool: True if cleanup successful
+    """
+    try:
+        # Delete test cycles
+        if cycle_ids:
+            for cycle_id in cycle_ids:
+                try:
+                    delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
+                    execute_query(delete_cycle_query, (cycle_id,), commit=True)
+                    print(f"   ✅ Deleted test cycle {cycle_id}")
+                except Exception as e:
+                    print(f"   ⚠️ Error deleting cycle {cycle_id}: {e}")
+        
+        # Delete test assets
+        if asset_ids:
+            for asset_id in asset_ids:
+                try:
+                    delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
+                    execute_query(delete_asset_query, (asset_id,), commit=True)
+                    print(f"   ✅ Deleted test asset {asset_id}")
+                except Exception as e:
+                    print(f"   ⚠️ Error deleting asset {asset_id}: {e}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"   ❌ Database cleanup error: {e}")
+        return False
+
+
+def comprehensive_test_teardown(test_name, asset_ids=None, cycle_ids=None, test_symbols=None, timeout_seconds=5):
+    """
+    Comprehensive teardown that cleans both Alpaca account and database records.
+    
+    This function should be called in the finally block of every integration test
+    that creates orders, positions, or database records.
+    
+    Args:
+        test_name: Name of the test for logging
+        asset_ids: List of asset IDs to delete from database
+        cycle_ids: List of cycle IDs to delete from database  
+        test_symbols: Ignored - always cleans ALL orders and positions
+        timeout_seconds: Maximum time to wait for Alpaca cleanup
+    
+    Returns:
+        bool: True if all cleanup successful, False if any failures
+    """
+    print(f"\n🧹 COMPREHENSIVE TEARDOWN: {test_name}")
+    print("="*60)
+    
+    alpaca_success = True
+    database_success = True
+    
+    # Step 1: Clean Alpaca account (ALWAYS clean ALL orders and positions)
+    print("🔄 Cleaning Alpaca paper trading account...")
+    alpaca_success = robust_alpaca_teardown(test_symbols, timeout_seconds)
+    
+    if not alpaca_success:
+        print("❌ CRITICAL: Alpaca cleanup failed!")
+        print("⚠️ WARNING: Subsequent tests may be affected by leftover orders/positions")
+    
+    # Step 2: Clean database records
+    if asset_ids or cycle_ids:
+        print("🔄 Cleaning database test records...")
+        database_success = cleanup_test_database_records(asset_ids, cycle_ids)
+    
+    # Step 3: Final assessment
+    overall_success = alpaca_success and database_success
+    
+    if overall_success:
+        print("✅ TEARDOWN COMPLETE: All cleanup successful")
+    else:
+        print("❌ TEARDOWN INCOMPLETE: Some cleanup failed")
+        if not alpaca_success:
+            print("   • Alpaca account cleanup failed")
+        if not database_success:
+            print("   • Database cleanup failed")
+    
+    print("="*60)
+    
+    return overall_success
 
 
 def test_phase1_asset_and_cycle_crud():
@@ -285,6 +511,10 @@ def test_phase2_alpaca_rest_api_order_cycle():
     print("PHASE 2 INTEGRATION TEST: Alpaca REST API Order Cycle")
     print("="*60)
     
+    # Track resources for cleanup
+    test_order_id = None
+    client = None
+    
     try:
         # Setup: Initialize TradingClient
         print("\n1. Initializing Alpaca TradingClient...")
@@ -429,6 +659,19 @@ def test_phase2_alpaca_rest_api_order_cycle():
         print(f"❌ FAILED: Unexpected error during Phase 2 test: {e}")
         logger.exception("Phase 2 integration test failed with exception")
         return False
+        
+    finally:
+        # COMPREHENSIVE TEARDOWN: Use robust cleanup system
+        try:
+            comprehensive_test_teardown(
+                test_name="Phase 2 Alpaca REST API Order Cycle",
+                test_symbols=['BTC/USD'],
+                timeout_seconds=5
+            )
+        except Exception as teardown_error:
+            print(f"❌ CRITICAL TEARDOWN FAILURE: {teardown_error}")
+            print("⚠️ ABORTING FURTHER TESTS - Manual cleanup required")
+            raise
 
 
 def _wait_for_trade_update_with_order_id(log_monitor, order_id, timeout):
@@ -1290,41 +1533,19 @@ def test_phase5_safety_order_logic():
         return False
         
     finally:
-        # TEARDOWN: Clean up all test resources
-        print(f"\n🧹 TEARDOWN: Cleaning up test resources...")
-        
-        # Cancel any orders placed during test
-        if client and placed_orders:
-            print("   Cancelling test orders...")
-            for order_id in placed_orders:
-                try:
-                    cancel_success = cancel_order(client, order_id)
-                    if cancel_success:
-                        print(f"   ✅ Cancelled order {order_id}")
-                    else:
-                        print(f"   ⚠️ Could not cancel order {order_id}")
-                except Exception as e:
-                    print(f"   ⚠️ Error cancelling order {order_id}: {e}")
-        
-        # Delete test cycle
-        if test_cycle_id:
-            try:
-                delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
-                execute_query(delete_cycle_query, (test_cycle_id,), commit=True)
-                print(f"   ✅ Deleted test cycle {test_cycle_id}")
-            except Exception as e:
-                print(f"   ⚠️ Error deleting cycle: {e}")
-        
-        # Delete test asset
-        if test_asset_id:
-            try:
-                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
-                execute_query(delete_asset_query, (test_asset_id,), commit=True)
-                print(f"   ✅ Deleted test asset {test_asset_id}")
-            except Exception as e:
-                print(f"   ⚠️ Error deleting asset: {e}")
-        
-        print("   ✅ Teardown completed")
+        # COMPREHENSIVE TEARDOWN: Use robust cleanup system
+        try:
+            comprehensive_test_teardown(
+                test_name="Phase 5 Safety Order Logic",
+                asset_ids=[test_asset_id] if test_asset_id else None,
+                cycle_ids=[test_cycle_id] if test_cycle_id else None,
+                test_symbols=['ETH/USD'],
+                timeout_seconds=5
+            )
+        except Exception as teardown_error:
+            print(f"❌ CRITICAL TEARDOWN FAILURE: {teardown_error}")
+            print("⚠️ ABORTING FURTHER TESTS - Manual cleanup required")
+            raise
 
 
 def test_websocket_handler_base_order_placement():
@@ -2563,6 +2784,17 @@ def main():
                 print("\n❌ Simulated Take-Profit: ❌ FAILED")
                 sys.exit(1)
             return
+        elif phase_arg == 'cleanup':
+            print("\n🎯 Running ONLY Cleanup...")
+            cleanup_success = robust_alpaca_teardown(timeout_seconds=10)
+            if cleanup_success:
+                print("\n🎉 Cleanup: ✅ PASSED")
+                print("✅ Your Alpaca paper account is now completely clean!")
+            else:
+                print("\n❌ Cleanup: ❌ FAILED")
+                print("❌ Some positions or orders could not be cleaned up")
+                sys.exit(1)
+            return
         elif phase_arg in ['help', '--help', '-h']:
             print_help()
             return
@@ -2642,6 +2874,7 @@ def print_help():
     print("  python integration_test.py sim-safety      # Run simulated safety order placement test")
     print("  python integration_test.py sim-trade       # Run simulated trade update processing test")
     print("  python integration_test.py sim-take-profit # Run simulated take-profit test")
+    print("  python integration_test.py cleanup         # Clean ALL orders and positions from Alpaca")
     print("  python integration_test.py help            # Show this help")
     print("\nPHASE DESCRIPTIONS:")
     print("  Phase 1: Tests database CRUD operations (dca_assets, dca_cycles tables)")
