@@ -304,6 +304,26 @@ def get_open_orders(client: TradingClient) -> list[Order]:
         return []
 
 
+def get_order(client: TradingClient, order_id: str) -> Optional[Order]:
+    """
+    Fetch a specific order by ID from Alpaca
+    
+    Args:
+        client: Initialized TradingClient
+        order_id: Alpaca order ID to fetch
+        
+    Returns:
+        Order object if found, None if error or not found
+    """
+    try:
+        order = client.get_order_by_id(order_id)
+        logger.debug(f"Retrieved order {order_id}: {order.status}")
+        return order
+    except Exception as e:
+        logger.error(f"Error fetching order {order_id}: {e}")
+        return None
+
+
 def cancel_order(client: TradingClient, order_id: str) -> bool:
     """
     Cancel an order by ID

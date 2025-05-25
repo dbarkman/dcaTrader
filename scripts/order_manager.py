@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src
 
 # Import our utilities and models
 from utils.db_utils import get_db_connection, execute_query, check_connection
-from utils.alpaca_client_rest import get_trading_client, get_open_orders, cancel_order
+from utils.alpaca_client_rest import get_trading_client, get_open_orders, cancel_order, get_order
 from models.cycle_data import DcaCycle
 
 # Configure logging
@@ -52,6 +52,7 @@ config = get_config()
 # Configuration
 STALE_ORDER_THRESHOLD_MINUTES = config.stale_order_threshold_minutes
 STALE_ORDER_THRESHOLD = timedelta(minutes=STALE_ORDER_THRESHOLD_MINUTES)
+STUCK_MARKET_SELL_TIMEOUT_SECONDS = 75  # Timeout for stuck market SELL orders
 DRY_RUN = config.dry_run_mode
 
 
@@ -184,6 +185,59 @@ def identify_orphaned_orders(open_orders: List, active_order_ids: Set[str], curr
     return orphaned_orders
 
 
+def identify_stuck_sell_orders(current_time: datetime) -> List[DcaCycle]:
+    """
+    Identify cycles with stuck market SELL orders that should be canceled.
+    
+    Args:
+        current_time: Current UTC time
+    
+    Returns:
+        List: DcaCycle objects with stuck SELL orders
+    """
+    stuck_cycles = []
+    
+    try:
+        # Query for cycles in 'selling' status with active orders
+        query = """
+        SELECT id, asset_id, status, quantity, average_purchase_price, 
+               safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
+               completed_at, created_at, updated_at
+        FROM dca_cycles 
+        WHERE status = 'selling' 
+        AND latest_order_id IS NOT NULL 
+        AND latest_order_created_at IS NOT NULL
+        """
+        
+        results = execute_query(query, fetch_all=True)
+        
+        if not results:
+            logger.info("No cycles in 'selling' status with active orders found")
+            return stuck_cycles
+        
+        logger.info(f"Found {len(results)} cycles in 'selling' status with active orders")
+        
+        for row in results:
+            cycle = DcaCycle.from_dict(row)
+            
+            # Calculate order age
+            order_age = calculate_order_age(cycle.latest_order_created_at, current_time)
+            
+            # Check if order is stuck (older than threshold)
+            if order_age.total_seconds() > STUCK_MARKET_SELL_TIMEOUT_SECONDS:
+                stuck_cycles.append(cycle)
+                logger.info(f"Identified stuck SELL order: cycle {cycle.id}, "
+                           f"order {cycle.latest_order_id}, "
+                           f"age: {order_age.total_seconds():.0f}s")
+        
+        logger.info(f"Found {len(stuck_cycles)} stuck SELL orders")
+        return stuck_cycles
+        
+    except Exception as e:
+        logger.error(f"Error identifying stuck SELL orders: {e}")
+        return []
+
+
 def cancel_orders(client, orders_to_cancel: List, order_type: str) -> int:
     """
     Cancel a list of orders.
@@ -217,6 +271,72 @@ def cancel_orders(client, orders_to_cancel: List, order_type: str) -> int:
                     
         except Exception as e:
             logger.error(f"❌ Error canceling {order_type} order {order.id}: {e}")
+    
+    return canceled_count
+
+
+def handle_stuck_sell_orders(client, stuck_cycles: List[DcaCycle]) -> int:
+    """
+    Handle stuck market SELL orders by verifying their status and canceling if needed.
+    
+    Args:
+        client: Alpaca trading client
+        stuck_cycles: List of cycles with potentially stuck SELL orders
+    
+    Returns:
+        int: Number of orders successfully canceled
+    """
+    canceled_count = 0
+    
+    for cycle in stuck_cycles:
+        try:
+            order_id = cycle.latest_order_id
+            logger.info(f"Market SELL order {order_id} for cycle {cycle.id} appears stuck "
+                       f"(age > {STUCK_MARKET_SELL_TIMEOUT_SECONDS}s). Attempting to verify and cancel.")
+            
+            # Verify order status on Alpaca
+            alpaca_order = get_order(client, order_id)
+            
+            if not alpaca_order:
+                logger.warning(f"Stuck SELL check: Order {order_id} not found on Alpaca. "
+                              f"May have already been processed.")
+                continue
+            
+            # Check if order is still in an active state
+            active_statuses = ['new', 'accepted', 'pending_new', 'partially_filled']
+            terminal_statuses = ['filled', 'canceled', 'cancelled', 'rejected', 'expired']
+            
+            order_status = alpaca_order.status.value if hasattr(alpaca_order.status, 'value') else str(alpaca_order.status)
+            
+            if order_status.lower() in [s.lower() for s in active_statuses]:
+                # Order is still active - attempt to cancel
+                logger.info(f"Order {order_id} is in active status '{order_status}'. Attempting cancellation...")
+                
+                if DRY_RUN:
+                    logger.info(f"[DRY RUN] Would cancel stuck SELL order: {order_id} "
+                               f"(cycle {cycle.id}, status: {order_status})")
+                    canceled_count += 1
+                else:
+                    success = cancel_order(client, order_id)
+                    if success:
+                        logger.info(f"✅ Successfully requested cancellation of stuck SELL order: {order_id} "
+                                   f"(cycle {cycle.id})")
+                        canceled_count += 1
+                    else:
+                        logger.warning(f"⚠️ Failed to cancel stuck SELL order: {order_id} "
+                                      f"(cycle {cycle.id})")
+                        
+            elif order_status.lower() in [s.lower() for s in terminal_statuses]:
+                # Order is already in terminal state
+                logger.info(f"Stuck SELL check: Order {order_id} already in terminal state '{order_status}'. "
+                           f"No cancellation needed by order_manager. TradingStream should handle/have handled the final state.")
+            else:
+                # Unknown status
+                logger.warning(f"Stuck SELL check: Order {order_id} has unknown status '{order_status}'. "
+                              f"Skipping cancellation attempt.")
+                
+        except Exception as e:
+            logger.error(f"❌ Error handling stuck SELL order {cycle.latest_order_id} for cycle {cycle.id}: {e}")
     
     return canceled_count
 
@@ -256,48 +376,71 @@ def main():
         open_orders = get_open_orders(client)
         logger.info(f"📋 Found {len(open_orders)} open orders on Alpaca")
         
-        if not open_orders:
-            logger.info("✅ No open orders found - nothing to manage")
-            return True
+        # Note: Even if no open orders, we still need to check for stuck SELL orders
+        # as they might be tracked in our database but already processed by Alpaca
         
-        # Step 3: Get active cycle order IDs
-        logger.info("🔍 Fetching active cycle order IDs from database...")
-        active_order_ids = get_active_cycle_order_ids()
+        # Step 3: Handle open orders (if any)
+        stale_canceled = 0
+        orphaned_canceled = 0
         
-        # Step 4: Identify stale BUY orders
-        logger.info("🔍 Identifying stale BUY limit orders...")
-        stale_buy_orders = identify_stale_buy_orders(open_orders, active_order_ids, current_time)
-        logger.info(f"Found {len(stale_buy_orders)} stale BUY orders")
-        
-        # Step 5: Identify orphaned orders
-        logger.info("🔍 Identifying orphaned orders...")
-        orphaned_orders = identify_orphaned_orders(open_orders, active_order_ids, current_time)
-        logger.info(f"Found {len(orphaned_orders)} orphaned orders")
-        
-        # Step 6: Cancel stale BUY orders (these are BUY limit orders not tracked in DB)
-        if stale_buy_orders:
-            logger.info(f"🧹 Canceling {len(stale_buy_orders)} stale BUY orders...")
-            stale_canceled = cancel_orders(client, stale_buy_orders, "stale BUY")
-            logger.info(f"✅ Canceled {stale_canceled}/{len(stale_buy_orders)} stale BUY orders")
+        if open_orders:
+            # Step 3a: Get active cycle order IDs
+            logger.info("🔍 Fetching active cycle order IDs from database...")
+            active_order_ids = get_active_cycle_order_ids()
+            
+            # Step 4: Identify stale BUY orders
+            logger.info("🔍 Identifying stale BUY limit orders...")
+            stale_buy_orders = identify_stale_buy_orders(open_orders, active_order_ids, current_time)
+            logger.info(f"Found {len(stale_buy_orders)} stale BUY orders")
+            
+            # Step 5: Identify orphaned orders
+            logger.info("🔍 Identifying orphaned orders...")
+            orphaned_orders = identify_orphaned_orders(open_orders, active_order_ids, current_time)
+            logger.info(f"Found {len(orphaned_orders)} orphaned orders")
+            
+            # Step 6: Cancel stale BUY orders (these are BUY limit orders not tracked in DB)
+            if stale_buy_orders:
+                logger.info(f"🧹 Canceling {len(stale_buy_orders)} stale BUY orders...")
+                stale_canceled = cancel_orders(client, stale_buy_orders, "stale BUY")
+                logger.info(f"✅ Canceled {stale_canceled}/{len(stale_buy_orders)} stale BUY orders")
+            else:
+                logger.info("✅ No stale BUY orders to cancel")
+            
+            # Step 7: Cancel orphaned orders (non-BUY orders not tracked in DB)
+            # Filter out BUY orders since they were already handled above
+            non_buy_orphaned = [o for o in orphaned_orders if o.side.value != 'buy']
+            
+            if non_buy_orphaned:
+                logger.info(f"🧹 Canceling {len(non_buy_orphaned)} orphaned non-BUY orders...")
+                orphaned_canceled = cancel_orders(client, non_buy_orphaned, "orphaned")
+                logger.info(f"✅ Canceled {orphaned_canceled}/{len(non_buy_orphaned)} orphaned orders")
+            else:
+                logger.info("✅ No orphaned non-BUY orders to cancel")
         else:
-            logger.info("✅ No stale BUY orders to cancel")
-            stale_canceled = 0
+            logger.info("✅ No open orders found on Alpaca")
+            stale_buy_orders = []
+            orphaned_orders = []
+            non_buy_orphaned = []
+            active_order_ids = set()  # Initialize for summary
+
         
-        # Step 7: Cancel orphaned orders (non-BUY orders not tracked in DB)
-        # Filter out BUY orders since they were already handled above
-        non_buy_orphaned = [o for o in orphaned_orders if o.side.value != 'buy']
+        # Step 8: NEW - Handle stuck market SELL orders
+        logger.info("🔍 Identifying stuck market SELL orders...")
+        logger.info(f"⏱️ Stuck SELL order threshold: {STUCK_MARKET_SELL_TIMEOUT_SECONDS} seconds")
+        stuck_sell_cycles = identify_stuck_sell_orders(current_time)
+        logger.info(f"Found {len(stuck_sell_cycles)} stuck SELL orders")
         
-        if non_buy_orphaned:
-            logger.info(f"🧹 Canceling {len(non_buy_orphaned)} orphaned non-BUY orders...")
-            orphaned_canceled = cancel_orders(client, non_buy_orphaned, "orphaned")
-            logger.info(f"✅ Canceled {orphaned_canceled}/{len(non_buy_orphaned)} orphaned orders")
+        if stuck_sell_cycles:
+            logger.info(f"🧹 Handling {len(stuck_sell_cycles)} stuck SELL orders...")
+            stuck_sell_canceled = handle_stuck_sell_orders(client, stuck_sell_cycles)
+            logger.info(f"✅ Canceled {stuck_sell_canceled}/{len(stuck_sell_cycles)} stuck SELL orders")
         else:
-            logger.info("✅ No orphaned non-BUY orders to cancel")
-            orphaned_canceled = 0
+            logger.info("✅ No stuck SELL orders to cancel")
+            stuck_sell_canceled = 0
         
-        # Step 8: Summary
-        total_canceled = stale_canceled + orphaned_canceled
-        total_identified = len(stale_buy_orders) + len(non_buy_orphaned)
+        # Step 9: Summary
+        total_canceled = stale_canceled + orphaned_canceled + stuck_sell_canceled
+        total_identified = len(stale_buy_orders) + len(non_buy_orphaned) + len(stuck_sell_cycles)
         
         logger.info("="*60)
         logger.info("ORDER MANAGER SUMMARY:")
@@ -305,6 +448,7 @@ def main():
         logger.info(f"📊 Active cycle orders: {len(active_order_ids)}")
         logger.info(f"📊 Stale BUY orders found: {len(stale_buy_orders)}")
         logger.info(f"📊 Orphaned orders found: {len(orphaned_orders)}")
+        logger.info(f"📊 Stuck SELL orders found: {len(stuck_sell_cycles)}")
         logger.info(f"📊 Total orders canceled: {total_canceled}/{total_identified}")
         
         if DRY_RUN:

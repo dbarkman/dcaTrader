@@ -20,9 +20,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'scr
 from order_manager import (
     identify_stale_buy_orders,
     identify_orphaned_orders,
+    identify_stuck_sell_orders,
+    handle_stuck_sell_orders,
     calculate_order_age,
     get_active_cycle_order_ids,
-    STALE_ORDER_THRESHOLD
+    STALE_ORDER_THRESHOLD,
+    STUCK_MARKET_SELL_TIMEOUT_SECONDS
 )
 
 
@@ -316,6 +319,173 @@ class TestOrderManager(unittest.TestCase):
         active_ids = get_active_cycle_order_ids()
         
         self.assertEqual(active_ids, set(), "Should return empty set on database error")
+    
+    @patch('order_manager.execute_query')
+    def test_identify_stuck_sell_orders(self, mock_execute_query):
+        """Test identification of stuck market SELL orders."""
+        from models.cycle_data import DcaCycle
+        from decimal import Decimal
+        
+        # Create mock cycle data - one stuck, one recent
+        stuck_time = self.current_time - timedelta(seconds=STUCK_MARKET_SELL_TIMEOUT_SECONDS + 10)
+        recent_time = self.current_time - timedelta(seconds=30)  # Not stuck yet
+        
+        mock_execute_query.return_value = [
+            {
+                'id': 1, 'asset_id': 1, 'status': 'selling',
+                'quantity': Decimal('1.0'), 'average_purchase_price': Decimal('50000.0'),
+                'safety_orders': 0, 'latest_order_id': 'stuck_order_123',
+                'latest_order_created_at': stuck_time, 'last_order_fill_price': None,
+                'completed_at': None, 'created_at': self.current_time, 'updated_at': self.current_time
+            },
+            {
+                'id': 2, 'asset_id': 1, 'status': 'selling',
+                'quantity': Decimal('0.5'), 'average_purchase_price': Decimal('3000.0'),
+                'safety_orders': 1, 'latest_order_id': 'recent_order_456',
+                'latest_order_created_at': recent_time, 'last_order_fill_price': None,
+                'completed_at': None, 'created_at': self.current_time, 'updated_at': self.current_time
+            }
+        ]
+        
+        stuck_cycles = identify_stuck_sell_orders(self.current_time)
+        
+        # Verify correct query was called
+        mock_execute_query.assert_called_once()
+        call_args = mock_execute_query.call_args
+        self.assertIn("status = 'selling'", call_args[0][0])
+        self.assertIn("latest_order_id IS NOT NULL", call_args[0][0])
+        self.assertIn("latest_order_created_at IS NOT NULL", call_args[0][0])
+        
+        # Should identify only the stuck order
+        self.assertEqual(len(stuck_cycles), 1, "Should identify exactly 1 stuck SELL order")
+        self.assertEqual(stuck_cycles[0].id, 1, "Should identify the stuck cycle")
+        self.assertEqual(stuck_cycles[0].latest_order_id, 'stuck_order_123', "Should have correct order ID")
+    
+    @patch('order_manager.execute_query')
+    def test_identify_stuck_sell_orders_empty_result(self, mock_execute_query):
+        """Test handling when no cycles are in selling status."""
+        mock_execute_query.return_value = []
+        
+        stuck_cycles = identify_stuck_sell_orders(self.current_time)
+        
+        self.assertEqual(len(stuck_cycles), 0, "Should return empty list when no selling cycles found")
+    
+    @patch('order_manager.execute_query')
+    def test_identify_stuck_sell_orders_database_error(self, mock_execute_query):
+        """Test handling of database errors."""
+        mock_execute_query.side_effect = Exception("Database connection failed")
+        
+        stuck_cycles = identify_stuck_sell_orders(self.current_time)
+        
+        self.assertEqual(len(stuck_cycles), 0, "Should return empty list on database error")
+    
+    @patch('order_manager.get_order')
+    @patch('order_manager.cancel_order')
+    def test_handle_stuck_sell_orders_active_order(self, mock_cancel_order, mock_get_order):
+        """Test handling stuck SELL order when Alpaca order is still active."""
+        from models.cycle_data import DcaCycle
+        from decimal import Decimal
+        
+        # Create mock stuck cycle
+        stuck_cycle = DcaCycle(
+            id=1, asset_id=1, status='selling',
+            quantity=Decimal('1.0'), average_purchase_price=Decimal('50000.0'),
+            safety_orders=0, latest_order_id='stuck_order_123',
+            latest_order_created_at=self.current_time - timedelta(seconds=100),
+            last_order_fill_price=None, completed_at=None,
+            created_at=self.current_time, updated_at=self.current_time
+        )
+        
+        # Mock Alpaca order in active state
+        mock_alpaca_order = Mock()
+        mock_alpaca_order.status = Mock()
+        mock_alpaca_order.status.value = 'accepted'
+        mock_get_order.return_value = mock_alpaca_order
+        
+        # Mock successful cancellation
+        mock_cancel_order.return_value = True
+        
+        # Mock client
+        mock_client = Mock()
+        
+        # Test the function
+        canceled_count = handle_stuck_sell_orders(mock_client, [stuck_cycle])
+        
+        # Verify calls
+        mock_get_order.assert_called_once_with(mock_client, 'stuck_order_123')
+        mock_cancel_order.assert_called_once_with(mock_client, 'stuck_order_123')
+        
+        # Should have canceled 1 order
+        self.assertEqual(canceled_count, 1, "Should cancel 1 stuck order")
+    
+    @patch('order_manager.get_order')
+    @patch('order_manager.cancel_order')
+    def test_handle_stuck_sell_orders_terminal_state(self, mock_cancel_order, mock_get_order):
+        """Test handling stuck SELL order when Alpaca order is already in terminal state."""
+        from models.cycle_data import DcaCycle
+        from decimal import Decimal
+        
+        # Create mock stuck cycle
+        stuck_cycle = DcaCycle(
+            id=1, asset_id=1, status='selling',
+            quantity=Decimal('1.0'), average_purchase_price=Decimal('50000.0'),
+            safety_orders=0, latest_order_id='filled_order_123',
+            latest_order_created_at=self.current_time - timedelta(seconds=100),
+            last_order_fill_price=None, completed_at=None,
+            created_at=self.current_time, updated_at=self.current_time
+        )
+        
+        # Mock Alpaca order in terminal state
+        mock_alpaca_order = Mock()
+        mock_alpaca_order.status = Mock()
+        mock_alpaca_order.status.value = 'filled'
+        mock_get_order.return_value = mock_alpaca_order
+        
+        # Mock client
+        mock_client = Mock()
+        
+        # Test the function
+        canceled_count = handle_stuck_sell_orders(mock_client, [stuck_cycle])
+        
+        # Verify calls
+        mock_get_order.assert_called_once_with(mock_client, 'filled_order_123')
+        mock_cancel_order.assert_not_called()  # Should not attempt cancellation
+        
+        # Should not have canceled any orders
+        self.assertEqual(canceled_count, 0, "Should not cancel orders in terminal state")
+    
+    @patch('order_manager.get_order')
+    @patch('order_manager.cancel_order')
+    def test_handle_stuck_sell_orders_order_not_found(self, mock_cancel_order, mock_get_order):
+        """Test handling stuck SELL order when Alpaca order is not found."""
+        from models.cycle_data import DcaCycle
+        from decimal import Decimal
+        
+        # Create mock stuck cycle
+        stuck_cycle = DcaCycle(
+            id=1, asset_id=1, status='selling',
+            quantity=Decimal('1.0'), average_purchase_price=Decimal('50000.0'),
+            safety_orders=0, latest_order_id='missing_order_123',
+            latest_order_created_at=self.current_time - timedelta(seconds=100),
+            last_order_fill_price=None, completed_at=None,
+            created_at=self.current_time, updated_at=self.current_time
+        )
+        
+        # Mock order not found
+        mock_get_order.return_value = None
+        
+        # Mock client
+        mock_client = Mock()
+        
+        # Test the function
+        canceled_count = handle_stuck_sell_orders(mock_client, [stuck_cycle])
+        
+        # Verify calls
+        mock_get_order.assert_called_once_with(mock_client, 'missing_order_123')
+        mock_cancel_order.assert_not_called()  # Should not attempt cancellation
+        
+        # Should not have canceled any orders
+        self.assertEqual(canceled_count, 0, "Should not cancel orders that are not found")
 
 
 if __name__ == '__main__':
