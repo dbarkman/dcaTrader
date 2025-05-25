@@ -4074,6 +4074,261 @@ def run_phase10_test():
     return test_phase10_order_manager_cleans_orders()
 
 
+def test_phase11_cooldown_manager_updates_status():
+    """
+    Integration Test for Phase 11: Cooldown Manager Caretaker Script
+    
+    Scenario: A cycle is in 'cooldown', and its cooldown period expires.
+    Setup:
+    - Asset in dca_assets with cooldown_period (e.g., 60 seconds for test).
+    - Manually create a 'complete' dca_cycles row for this asset with completed_at set to (current time - 70 seconds).
+    - Manually create a 'cooldown' dca_cycles row for the same asset (created after the 'complete' one).
+    Action: Run scripts/cooldown_manager.py.
+    Assert: The 'cooldown' dca_cycles row status is updated to 'watching'.
+    """
+    print("\n" + "="*60)
+    print("PHASE 11 INTEGRATION TEST: Cooldown Manager Updates Status")
+    print("="*60)
+    
+    test_asset_id = None
+    complete_cycle_id = None
+    cooldown_cycle_id = None
+    created_test_asset = False
+    
+    try:
+        # Step 1: Database connection check
+        print("🔧 Step 1: Checking database connection...")
+        if not check_connection():
+            print("❌ Database connection failed")
+            return False
+        print("✅ Database connection established")
+        
+        # Step 2: Setup test asset with short cooldown period
+        print("🔧 Step 2: Setting up test asset with 60-second cooldown...")
+        
+        # Create or update a test asset with 60-second cooldown
+        test_symbol = "BTC/USD"
+        
+        # Check if asset already exists
+        existing_asset = get_asset_config(test_symbol)
+        if existing_asset:
+            test_asset_id = existing_asset.id
+            print(f"   Using existing asset {test_asset_id} ({test_symbol})")
+            
+            # Update cooldown period for testing
+            update_success = update_asset_config(test_asset_id, {'cooldown_period': 60})
+            if not update_success:
+                print("❌ Failed to update asset cooldown period")
+                return False
+            print("   ✅ Updated cooldown period to 60 seconds")
+        else:
+            print(f"   Asset {test_symbol} not found, creating test asset...")
+            
+            # Create a test asset
+            create_asset_query = """
+            INSERT INTO dca_assets (
+                asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+                max_safety_orders, safety_order_deviation, take_profit_percent,
+                cooldown_period, buy_order_price_deviation_percent
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            asset_params = (
+                test_symbol,  # asset_symbol
+                True,         # is_enabled
+                100.0,        # base_order_amount
+                150.0,        # safety_order_amount
+                3,            # max_safety_orders
+                2.5,          # safety_order_deviation
+                1.0,          # take_profit_percent
+                60,           # cooldown_period (60 seconds for test)
+                0.1           # buy_order_price_deviation_percent
+            )
+            
+            test_asset_id = execute_query(create_asset_query, asset_params, commit=True)
+            if not test_asset_id:
+                print("❌ Failed to create test asset")
+                return False
+            
+            created_test_asset = True
+            print(f"   ✅ Created test asset {test_asset_id} ({test_symbol}) with 60-second cooldown")
+        
+        # Step 3: Create a 'complete' cycle with completed_at 70 seconds ago
+        print("🔧 Step 3: Creating completed cycle (70 seconds ago)...")
+        
+        from datetime import datetime, timezone, timedelta
+        current_time = datetime.now(timezone.utc)
+        completed_time = current_time - timedelta(seconds=70)  # 70 seconds ago
+        
+        # Create the completed cycle
+        complete_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='complete',
+            quantity=Decimal('0.001'),
+            average_purchase_price=Decimal('50000.0'),
+            safety_orders=1,
+            completed_at=completed_time
+        )
+        complete_cycle_id = complete_cycle.id
+        print(f"   ✅ Created complete cycle {complete_cycle_id} (completed at: {completed_time})")
+        
+        # Add a small delay to ensure cooldown cycle is created after complete cycle
+        import time
+        time.sleep(1)
+        
+        # Step 4: Create a 'cooldown' cycle (created after the complete one)
+        print("🔧 Step 4: Creating cooldown cycle...")
+        
+        cooldown_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='cooldown',
+            quantity=Decimal('0'),
+            average_purchase_price=Decimal('0'),
+            safety_orders=0
+        )
+        cooldown_cycle_id = cooldown_cycle.id
+        print(f"   ✅ Created cooldown cycle {cooldown_cycle_id}")
+        
+        # Step 5: Verify initial state
+        print("🔧 Step 5: Verifying initial database state...")
+        
+        # Check that cooldown cycle exists and has correct status
+        cooldown_check = execute_query(
+            "SELECT status FROM dca_cycles WHERE id = %s",
+            (cooldown_cycle_id,),
+            fetch_one=True
+        )
+        
+        if not cooldown_check or cooldown_check['status'] != 'cooldown':
+            print(f"❌ Cooldown cycle {cooldown_cycle_id} not in expected state")
+            return False
+        
+        print(f"   ✅ Cooldown cycle {cooldown_cycle_id} status: {cooldown_check['status']}")
+        
+        # Step 6: Run cooldown manager script
+        print("🔧 Step 6: Running cooldown manager script...")
+        
+        import subprocess
+        result = subprocess.run(
+            ['python', 'scripts/cooldown_manager.py'],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd()
+        )
+        
+        print(f"   Script exit code: {result.returncode}")
+        if result.stdout:
+            print("   Script output:")
+            for line in result.stdout.strip().split('\n'):
+                print(f"     {line}")
+        
+        if result.stderr:
+            print("   Script errors:")
+            for line in result.stderr.strip().split('\n'):
+                print(f"     {line}")
+        
+        if result.returncode != 0:
+            print("❌ Cooldown manager script failed")
+            return False
+        
+        # Step 7: Verify that cooldown cycle status was updated to 'watching'
+        print("🔧 Step 7: Verifying cooldown cycle status update...")
+        
+        updated_cycle_check = execute_query(
+            "SELECT status FROM dca_cycles WHERE id = %s",
+            (cooldown_cycle_id,),
+            fetch_one=True
+        )
+        
+        if not updated_cycle_check:
+            print(f"❌ Could not find cooldown cycle {cooldown_cycle_id} after script execution")
+            return False
+        
+        final_status = updated_cycle_check['status']
+        print(f"   Final cooldown cycle {cooldown_cycle_id} status: {final_status}")
+        
+        if final_status != 'watching':
+            print(f"❌ Expected status 'watching', but got '{final_status}'")
+            return False
+        
+        print("   ✅ Cooldown cycle successfully updated to 'watching' status")
+        
+        # Step 8: Verify that complete cycle was not affected
+        print("🔧 Step 8: Verifying complete cycle was not affected...")
+        
+        complete_cycle_check = execute_query(
+            "SELECT status FROM dca_cycles WHERE id = %s",
+            (complete_cycle_id,),
+            fetch_one=True
+        )
+        
+        if not complete_cycle_check or complete_cycle_check['status'] != 'complete':
+            print(f"❌ Complete cycle {complete_cycle_id} status was unexpectedly changed")
+            return False
+        
+        print(f"   ✅ Complete cycle {complete_cycle_id} status unchanged: {complete_cycle_check['status']}")
+        
+        print("\n✅ PHASE 11 TEST PASSED!")
+        print("   • Cooldown manager correctly identified expired cooldown")
+        print("   • Cooldown cycle status updated from 'cooldown' to 'watching'")
+        print("   • Complete cycle status remained unchanged")
+        print("   • Script executed successfully with proper logging")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ PHASE 11 TEST FAILED: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+        
+    finally:
+        # Cleanup: Remove test cycles
+        print("\n🧹 Cleaning up test data...")
+        
+        cleanup_success = True
+        
+        if cooldown_cycle_id:
+            try:
+                execute_query("DELETE FROM dca_cycles WHERE id = %s", (cooldown_cycle_id,), commit=True)
+                print(f"   ✅ Deleted cooldown cycle {cooldown_cycle_id}")
+            except Exception as e:
+                print(f"   ⚠️ Could not delete cooldown cycle {cooldown_cycle_id}: {e}")
+                cleanup_success = False
+        
+        if complete_cycle_id:
+            try:
+                execute_query("DELETE FROM dca_cycles WHERE id = %s", (complete_cycle_id,), commit=True)
+                print(f"   ✅ Deleted complete cycle {complete_cycle_id}")
+            except Exception as e:
+                print(f"   ⚠️ Could not delete complete cycle {complete_cycle_id}: {e}")
+                cleanup_success = False
+        
+        if test_asset_id:
+            try:
+                if created_test_asset:
+                    # Delete the test asset we created
+                    execute_query("DELETE FROM dca_assets WHERE id = %s", (test_asset_id,), commit=True)
+                    print(f"   ✅ Deleted test asset {test_asset_id}")
+                else:
+                    # Reset cooldown period to original value for existing asset
+                    update_asset_config(test_asset_id, {'cooldown_period': 300})
+                    print(f"   ✅ Reset asset {test_asset_id} cooldown period to 300 seconds")
+            except Exception as e:
+                print(f"   ⚠️ Could not clean up test asset: {e}")
+                cleanup_success = False
+        
+        if cleanup_success:
+            print("   ✅ Cleanup completed successfully")
+        else:
+            print("   ⚠️ Some cleanup operations failed")
+
+
+def run_phase11_test():
+    """Wrapper function to run the Phase 11 test."""
+    return test_phase11_cooldown_manager_updates_status()
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -4178,6 +4433,15 @@ def main():
                 print("\n❌ Phase 10: ❌ FAILED")
                 sys.exit(1)
             return
+        elif phase_arg == 'phase11':
+            print("\n🎯 Running ONLY Phase 11 tests...")
+            phase11_success = run_phase11_test()
+            if phase11_success:
+                print("\n🎉 Phase 11: ✅ PASSED")
+            else:
+                print("\n❌ Phase 11: ❌ FAILED")
+                sys.exit(1)
+            return
         elif phase_arg == 'simulated':
             print("\n🎯 Running ONLY Simulated WebSocket Handler tests...")
             
@@ -4269,6 +4533,7 @@ def main():
     phase8_success = False
     phase9_success = False
     phase10_success = False
+    phase11_success = False
     
     # Run Phase 1 tests
     print("\nRunning Phase 1 tests...")
@@ -4310,6 +4575,10 @@ def main():
     print("\nRunning Phase 10 tests...")
     phase10_success = run_phase10_test()
     
+    # Run Phase 11 tests (Cooldown Manager Caretaker Script)
+    print("\nRunning Phase 11 tests...")
+    phase11_success = run_phase11_test()
+    
     # Final results
     print("\n" + "="*60)
     print("INTEGRATION TEST RESULTS SUMMARY")
@@ -4325,8 +4594,9 @@ def main():
     print(f"Phase 8 (TradingStream SELL Order Fill Processing): {'✅ PASSED' if phase8_success else '❌ FAILED'}")
     print(f"Phase 9 (TradingStream Order Cancellation/Rejection Handling): {'✅ PASSED' if phase9_success else '❌ FAILED'}")
     print(f"Phase 10 (Order Manager Caretaker Script): {'✅ PASSED' if phase10_success else '❌ FAILED'}")
+    print(f"Phase 11 (Cooldown Manager Caretaker Script): {'✅ PASSED' if phase11_success else '❌ FAILED'}")
     
-    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success, phase9_success, phase10_success]):
+    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success, phase8_success, phase9_success, phase10_success, phase11_success]):
         print("\n🎉 ALL PHASES PASSED!")
         print("The DCA Trading Bot is fully functional and ready for production!")
     else:
@@ -4349,6 +4619,7 @@ def print_help():
     print("  python integration_test.py phase8          # Run only Phase 8 (TradingStream SELL Order Fill Processing)")
     print("  python integration_test.py phase9          # Run only Phase 9 (TradingStream Order Cancellation/Rejection Handling)")
     print("  python integration_test.py phase10         # Run only Phase 10 (Order Manager Caretaker Script)")
+    print("  python integration_test.py phase11         # Run only Phase 11 (Cooldown Manager Caretaker Script)")
     print("  python integration_test.py simulated       # Run all simulated WebSocket handler tests")
     print("  python integration_test.py sim-base        # Run simulated base order placement test")
     print("  python integration_test.py sim-safety      # Run simulated safety order placement test")
@@ -4367,6 +4638,7 @@ def print_help():
     print("  Phase 8: Tests TradingStream SELL order fill processing logic")
     print("  Phase 9: Tests TradingStream order cancellation/rejection/expiration handling")
     print("  Phase 10: Tests Order Manager Caretaker Script")
+    print("  Phase 11: Tests Cooldown Manager Caretaker Script")
     print("\nSIMULATED TEST DESCRIPTIONS:")
     print("  simulated: Run all simulated WebSocket handler tests (fast, no waiting)")
     print("  sim-base: Test MarketDataStream base order placement with mock quote")

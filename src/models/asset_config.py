@@ -105,6 +105,46 @@ def get_asset_config(asset_symbol: str) -> Optional[DcaAsset]:
         raise
 
 
+def get_asset_config_by_id(asset_id: int) -> Optional[DcaAsset]:
+    """
+    Fetches an asset's configuration by its ID.
+    
+    Args:
+        asset_id: The asset ID to fetch
+        
+    Returns:
+        DcaAsset: Asset configuration if found, None otherwise
+        
+    Raises:
+        mysql.connector.Error: If database query fails
+    """
+    try:
+        query = """
+        SELECT id, asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+               max_safety_orders, safety_order_deviation, take_profit_percent,
+               cooldown_period, buy_order_price_deviation_percent, last_sell_price,
+               created_at, updated_at
+        FROM dca_assets 
+        WHERE id = %s
+        """
+        
+        result = execute_query(query, (asset_id,), fetch_one=True)
+        
+        if result:
+            logger.debug(f"Found asset configuration for ID {asset_id}")
+            return DcaAsset.from_dict(result)
+        else:
+            logger.debug(f"No asset configuration found for ID {asset_id}")
+            return None
+            
+    except Error as e:
+        logger.error(f"Error fetching asset config for ID {asset_id}: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error fetching asset config for ID {asset_id}: {e}")
+        raise
+
+
 def get_all_enabled_assets() -> List[DcaAsset]:
     """
     Fetches all enabled assets from the database.
