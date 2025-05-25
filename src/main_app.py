@@ -30,7 +30,7 @@ from alpaca.trading.stream import TradingStream
 from utils.db_utils import get_db_connection
 from models.asset_config import get_asset_config
 from models.cycle_data import get_latest_cycle, update_cycle
-from utils.alpaca_client_rest import get_trading_client, place_limit_buy_order, get_positions
+from utils.alpaca_client_rest import get_trading_client, place_limit_buy_order, get_positions, place_market_sell_order
 
 # Load environment variables
 load_dotenv()
@@ -79,6 +79,7 @@ async def on_crypto_quote(quote):
     
     Phase 4: Monitor prices and place base orders when conditions are met.
     Phase 5: Monitor prices and place safety orders when conditions are met.
+    Phase 6: Monitor prices and place take-profit orders when conditions are met.
     
     Args:
         quote: Quote object from Alpaca containing bid/ask data
@@ -97,6 +98,12 @@ async def on_crypto_quote(quote):
         await asyncio.to_thread(check_and_place_safety_order, quote)
     except Exception as e:
         logger.error(f"Error in safety order check for {quote.symbol}: {e}")
+    
+    # Phase 6: Check if we should place a take-profit order for this asset
+    try:
+        await asyncio.to_thread(check_and_place_take_profit_order, quote)
+    except Exception as e:
+        logger.error(f"Error in take-profit check for {quote.symbol}: {e}")
 
 
 def check_and_place_base_order(quote):
@@ -430,6 +437,173 @@ def check_and_place_safety_order(quote):
             
     except Exception as e:
         logger.error(f"Error in check_and_place_safety_order for {symbol}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+
+def check_and_place_take_profit_order(quote):
+    """
+    Check if conditions are met to place a take-profit order and place it if so.
+    
+    This function runs in a separate thread to avoid blocking the WebSocket.
+    Take-profit orders are placed when:
+    - Cycle status is 'watching' AND quantity > 0 (position exists)
+    - Safety order conditions are NOT met (price hasn't dropped enough)
+    - Current bid price >= take-profit trigger price (average_purchase_price * (1 + take_profit_percent/100))
+    
+    Args:
+        quote: Quote object from Alpaca containing bid/ask data
+    """
+    global recent_orders
+    symbol = quote.symbol
+    ask_price = quote.ask_price
+    bid_price = quote.bid_price
+    
+    try:
+        # Step 1: Check for recent orders to prevent duplicates
+        now = datetime.now()
+        recent_order_cooldown = 30  # seconds
+        
+        if symbol in recent_orders:
+            time_since_order = now - recent_orders[symbol]['timestamp']
+            if time_since_order.total_seconds() < recent_order_cooldown:
+                logger.debug(f"Skipping take-profit for {symbol} - recent order placed {time_since_order.total_seconds():.1f}s ago")
+                return
+        
+        # Step 2: Get asset configuration
+        asset_config = get_asset_config(symbol)
+        if not asset_config:
+            # Asset not configured - skip silently
+            return
+        
+        if not asset_config.is_enabled:
+            logger.debug(f"Asset {symbol} is disabled, skipping take-profit check")
+            return
+        
+        # Step 3: Get latest cycle for this asset
+        latest_cycle = get_latest_cycle(asset_config.id)
+        if not latest_cycle:
+            logger.debug(f"No cycle found for asset {symbol}, skipping take-profit check")
+            return
+        
+        # Step 4: Check if cycle is in 'watching' status with quantity > 0 (existing position)
+        if latest_cycle.status != 'watching':
+            logger.debug(f"Asset {symbol} cycle status is '{latest_cycle.status}', not 'watching' - skipping take-profit")
+            return
+        
+        if latest_cycle.quantity <= Decimal('0'):
+            logger.debug(f"Asset {symbol} cycle has quantity {latest_cycle.quantity}, not > 0 - skipping take-profit")
+            return
+        
+        # Step 5: Check if we have valid average_purchase_price for take-profit calculation
+        if latest_cycle.average_purchase_price is None or latest_cycle.average_purchase_price <= Decimal('0'):
+            logger.debug(f"Asset {symbol} has invalid average_purchase_price {latest_cycle.average_purchase_price} - cannot calculate take-profit")
+            return
+        
+        # Step 6: Check safety order conditions are NOT met (we don't want to sell if we should be buying more)
+        # Only check if we have last_order_fill_price and haven't reached max safety orders
+        safety_order_would_trigger = False
+        
+        if (latest_cycle.last_order_fill_price is not None and 
+            latest_cycle.safety_orders < asset_config.max_safety_orders):
+            
+            safety_deviation_decimal = asset_config.safety_order_deviation / Decimal('100')
+            safety_trigger_price = latest_cycle.last_order_fill_price * (Decimal('1') - safety_deviation_decimal)
+            ask_price_decimal = Decimal(str(ask_price))
+            
+            if ask_price_decimal <= safety_trigger_price:
+                safety_order_would_trigger = True
+                logger.debug(f"Safety order would trigger for {symbol} (ask ${ask_price} <= trigger ${safety_trigger_price:.4f}) - skipping take-profit")
+                return
+        
+        # Step 7: Calculate take-profit trigger price
+        take_profit_percent_decimal = asset_config.take_profit_percent / Decimal('100')  # Convert % to decimal
+        take_profit_trigger_price = latest_cycle.average_purchase_price * (Decimal('1') + take_profit_percent_decimal)
+        
+        # Convert bid_price to Decimal for consistent calculations
+        bid_price_decimal = Decimal(str(bid_price))
+        
+        logger.debug(f"Take-profit conditions for {symbol}:")
+        logger.debug(f"   Status: {latest_cycle.status} | Quantity: {latest_cycle.quantity}")
+        logger.debug(f"   Average Purchase Price: ${latest_cycle.average_purchase_price}")
+        logger.debug(f"   Take Profit %: {asset_config.take_profit_percent}%")
+        logger.debug(f"   Take Profit Trigger: ${take_profit_trigger_price:.4f}")
+        logger.debug(f"   Current Bid: ${bid_price}")
+        logger.debug(f"   Safety Order Would Trigger: {safety_order_would_trigger}")
+        
+        # Step 8: Check if current bid price has risen enough to trigger take-profit
+        if bid_price_decimal < take_profit_trigger_price:
+            logger.debug(f"Bid price ${bid_price} < take-profit trigger ${take_profit_trigger_price:.4f} - no take-profit needed")
+            return
+        
+        logger.info(f"💰 Take-profit conditions met for {symbol}!")
+        
+        # Step 9: Validate market data
+        if not bid_price or bid_price <= 0:
+            logger.error(f"Invalid bid price for take-profit {symbol}: {bid_price}")
+            return
+        
+        # Step 10: Initialize Alpaca client 
+        client = get_trading_client()
+        if not client:
+            logger.error(f"Could not initialize Alpaca client for take-profit {symbol}")
+            return
+        
+        # Step 11: Use the full cycle quantity for take-profit (sell entire position)
+        sell_quantity = float(latest_cycle.quantity)
+        
+        # Validate calculated values before placing order
+        if not sell_quantity or sell_quantity <= 0:
+            logger.error(f"Invalid sell quantity for take-profit {symbol}: {sell_quantity}")
+            return
+        
+        # Enhanced logging for take-profit order
+        price_gain = bid_price_decimal - latest_cycle.average_purchase_price
+        price_gain_pct = (price_gain / latest_cycle.average_purchase_price) * Decimal('100')
+        estimated_proceeds = bid_price_decimal * latest_cycle.quantity
+        estimated_cost = latest_cycle.average_purchase_price * latest_cycle.quantity
+        estimated_profit = estimated_proceeds - estimated_cost
+        
+        logger.info(f"📊 Take-Profit Analysis for {symbol}:")
+        logger.info(f"   Avg Purchase: ${latest_cycle.average_purchase_price:.4f} | Current Bid: ${bid_price:,.4f}")
+        logger.info(f"   Price Gain: ${price_gain:.4f} ({price_gain_pct:.2f}%)")
+        logger.info(f"   Take-Profit Trigger: ${take_profit_trigger_price:.4f} ({asset_config.take_profit_percent}% gain)")
+        logger.info(f"   Position: {latest_cycle.quantity} {symbol.split('/')[0]}")
+        logger.info(f"   Est. Proceeds: ${estimated_proceeds:.2f} | Est. Cost: ${estimated_cost:.2f}")
+        logger.info(f"   Est. Profit: ${estimated_profit:.2f}")
+        
+        # Step 12: Place the market sell order
+        logger.info(f"🔄 Placing MARKET SELL order for {symbol}:")
+        logger.info(f"   Type: MARKET | Side: SELL | Order Type: TAKE-PROFIT")
+        logger.info(f"   Quantity: {sell_quantity:.8f}")
+        logger.info(f"   Current Bid: ${bid_price:,.4f}")
+        logger.info(f"   💰 Selling entire position at market price")
+        
+        order = place_market_sell_order(
+            client=client,
+            symbol=symbol,
+            qty=sell_quantity,
+            time_in_force='gtc'  # Crypto market orders require 'gtc'
+        )
+        
+        if order:
+            # Track this order to prevent duplicates
+            recent_orders[symbol] = {
+                'order_id': order.id,
+                'timestamp': now
+            }
+            
+            logger.info(f"✅ MARKET SELL order PLACED for {symbol}:")
+            logger.info(f"   Order ID: {order.id}")
+            logger.info(f"   Quantity: {sell_quantity:.8f}")
+            logger.info(f"   Order Type: MARKET")
+            logger.info(f"   💰 Take-profit triggered by {price_gain_pct:.2f}% gain")
+            # NOTE: We do NOT update the cycle here - that's TradingStream's job when it fills
+        else:
+            logger.error(f"❌ Failed to place take-profit order for {symbol}")
+            
+    except Exception as e:
+        logger.error(f"Error in check_and_place_take_profit_order for {symbol}: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
 

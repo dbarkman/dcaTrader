@@ -181,6 +181,67 @@ def place_limit_buy_order(
         return None
 
 
+def place_market_sell_order(
+    client: TradingClient, 
+    symbol: str, 
+    qty: float, 
+    time_in_force: str = 'gtc'
+) -> Optional[Order]:
+    """
+    Place a market SELL order (for take-profit)
+    
+    Args:
+        client: Initialized TradingClient
+        symbol: Asset symbol (e.g., 'BTC/USD')
+        qty: Quantity to sell
+        time_in_force: Time in force ('day', 'gtc', etc.)
+        
+    Returns:
+        Order object if successful, None if error
+    """
+    try:
+        # Validate inputs before placing order
+        if qty is None:
+            logger.error(f"Invalid order parameters for {symbol}: qty={qty}")
+            return None
+            
+        if qty <= 0:
+            logger.error(f"Invalid quantity for {symbol}: {qty} (must be > 0)")
+            return None
+            
+        if not symbol or not isinstance(symbol, str):
+            logger.error(f"Invalid symbol: {symbol}")
+            return None
+        
+        # Convert time_in_force string to enum
+        tif_mapping = {
+            'day': TimeInForce.DAY,
+            'gtc': TimeInForce.GTC,
+            'ioc': TimeInForce.IOC,
+            'fok': TimeInForce.FOK
+        }
+        
+        tif_enum = tif_mapping.get(time_in_force.lower(), TimeInForce.DAY)
+        
+        # Log order details before submission
+        logger.info(f"Placing market SELL order: {qty} {symbol} ({time_in_force})")
+        
+        order_request = MarketOrderRequest(
+            symbol=symbol,
+            qty=qty,
+            side=OrderSide.SELL,
+            time_in_force=tif_enum
+        )
+        
+        order = client.submit_order(order_request)
+        logger.info(f"Market SELL order placed: {order.id} for {qty} {symbol}")
+        return order
+        
+    except Exception as e:
+        logger.error(f"Error placing market sell order for {symbol}: {e}")
+        return None
+
+
 def get_open_orders(client: TradingClient) -> list[Order]:
     """
     Fetch all open orders from Alpaca
