@@ -1706,6 +1706,7 @@ def test_websocket_handler_base_order_placement():
             print("❌ FAILED: Cycle was incorrectly updated by MarketDataStream handler")
             print(f"   Quantity: {updated_cycle.quantity} (expected: 0)")
             print(f"   Status: {updated_cycle.status} (expected: watching)")
+            print(f"   Avg Price: {updated_cycle.average_purchase_price} (expected: 0)")
             return False
         
         print("✅ SUCCESS: Cycle database correctly unchanged (as expected)")
@@ -2658,6 +2659,371 @@ async def test_websocket_handler_take_profit_order_placement():
         print("   ✅ Teardown completed")
 
 
+def create_mock_base_order_fill_event(symbol, order_id, fill_price, fill_qty, total_order_qty, limit_price):
+    """Create a mock trade update event for a base order fill."""
+    
+    # Create mock order object
+    mock_order = type('MockOrder', (), {
+        'id': order_id,
+        'symbol': symbol,
+        'side': 'buy',
+        'order_type': 'limit',
+        'time_in_force': 'gtc',
+        'filled_qty': str(fill_qty),
+        'filled_avg_price': str(fill_price),
+        'qty': str(total_order_qty),
+        'limit_price': str(limit_price),
+        'status': 'filled'
+    })()
+    
+    # Create mock trade update event
+    mock_event = type('MockTradeUpdate', (), {
+        'event': 'fill',
+        'order': mock_order,
+        'timestamp': datetime.now(),
+        'execution_id': f'exec_{order_id}_001'
+    })()
+    
+    return mock_event
+
+
+def create_mock_safety_order_fill_event(symbol, order_id, fill_price, fill_qty, total_order_qty, limit_price):
+    """Create a mock trade update event for a safety order fill."""
+    
+    # Create mock order object
+    mock_order = type('MockOrder', (), {
+        'id': order_id,
+        'symbol': symbol,
+        'side': 'buy',
+        'order_type': 'limit',
+        'time_in_force': 'gtc',
+        'filled_qty': str(fill_qty),
+        'filled_avg_price': str(fill_price),
+        'qty': str(total_order_qty),
+        'limit_price': str(limit_price),
+        'status': 'filled'
+    })()
+    
+    # Create mock trade update event
+    mock_event = type('MockTradeUpdate', (), {
+        'event': 'fill',
+        'order': mock_order,
+        'timestamp': datetime.now(),
+        'execution_id': f'exec_{order_id}_002'
+    })()
+    
+    return mock_event
+
+
+async def test_phase7_tradingstream_buy_fill_processing():
+    """
+    Integration Test for Phase 7: TradingStream BUY Order Fill Processing
+    
+    This test uses simulated trade update events to verify that the TradingStream
+    handler correctly processes BUY order fills and updates the database with:
+    - New quantity (current + filled)
+    - Recalculated weighted average purchase price
+    - Last order fill price
+    - Safety order count increment (if applicable)
+    - Status set to 'watching'
+    - latest_order_id cleared
+    
+    Scenarios tested:
+    1. Base order fill (quantity was 0)
+    2. Safety order fill (quantity > 0)
+    """
+    print("\n" + "="*80)
+    print("PHASE 7 INTEGRATION TEST: TradingStream BUY Order Fill Processing")
+    print("="*80)
+    print("TESTING: Simulated BUY order fills and database updates...")
+    
+    test_asset_id = None
+    base_cycle_id = None
+    safety_cycle_id = None
+    
+    try:
+        # SETUP: Database connection
+        print("\n1. 🔧 SETUP: Preparing test environment...")
+        if not check_connection():
+            print("❌ FAILED: Database connection test failed")
+            return False
+        print("✅ SUCCESS: Database connection established")
+        
+        # SETUP: Create test asset configuration
+        test_symbol = 'BTC/USD'
+        print(f"\n2. 🔧 SETUP: Creating test asset configuration for {test_symbol}...")
+        
+        insert_asset_query = """
+        INSERT INTO dca_assets (
+            asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+            max_safety_orders, safety_order_deviation, take_profit_percent,
+            cooldown_period, buy_order_price_deviation_percent
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        asset_params = (
+            test_symbol, True, Decimal('200.00'), Decimal('100.00'),
+            3, Decimal('2.0'), Decimal('1.5'), 300, Decimal('3.0')
+        )
+        
+        test_asset_id = execute_query(insert_asset_query, asset_params, commit=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        print(f"✅ SUCCESS: Created test asset with ID {test_asset_id}")
+        
+        # TEST 1: Base Order Fill (quantity was 0)
+        print(f"\n" + "="*60)
+        print("TEST 1: BASE ORDER FILL PROCESSING")
+        print("="*60)
+        
+        # SETUP: Create cycle for base order (quantity=0, status='buying')
+        print(f"\n3. 🔧 SETUP: Creating cycle for base order fill test...")
+        
+        base_order_id = 'test_base_order_12345'
+        base_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='buying',  # Order is pending
+            quantity=Decimal('0'),  # No position yet (base order)
+            average_purchase_price=Decimal('0'),
+            safety_orders=0,
+            latest_order_id=base_order_id  # This order is pending fill
+        )
+        
+        if not base_cycle:
+            print("❌ FAILED: Could not create base order cycle")
+            return False
+        
+        base_cycle_id = base_cycle.id
+        print(f"✅ SUCCESS: Created base order cycle:")
+        print(f"   Cycle ID: {base_cycle_id}")
+        print(f"   Status: buying (order pending)")
+        print(f"   Quantity: 0 BTC (no position yet)")
+        print(f"   Latest Order ID: {base_order_id}")
+        
+        # ACTION: Create mock trade update for base order fill
+        print(f"\n4. 🎯 ACTION: Creating mock base order fill event...")
+        
+        fill_price = 95000.0  # BTC filled at $95,000
+        fill_qty = 200.0 / fill_price  # $200 / $95,000 = 0.00210526 BTC
+        
+        mock_base_fill = create_mock_base_order_fill_event(
+            symbol=test_symbol,
+            order_id=base_order_id,
+            fill_price=fill_price,
+            fill_qty=fill_qty,
+            total_order_qty=fill_qty,
+            limit_price=95100.0  # Original limit was slightly higher
+        )
+        
+        print(f"   📊 Mock Base Order Fill:")
+        print(f"   📊 Order ID: {mock_base_fill.order.id}")
+        print(f"   📊 Symbol: {mock_base_fill.order.symbol}")
+        print(f"   📊 Side: {mock_base_fill.order.side}")
+        print(f"   📊 Fill Price: ${fill_price:,.2f}")
+        print(f"   📊 Fill Quantity: {fill_qty:.8f} BTC")
+        print(f"   📊 Fill Value: ${fill_price * fill_qty:.2f}")
+        
+        # ACTION: Process the trade update
+        print(f"\n5. 🎯 ACTION: Processing base order fill via on_trade_update()...")
+        
+        # Import and call the async handler
+        import sys
+        sys.path.insert(0, 'src')
+        from main_app import on_trade_update
+        
+        await on_trade_update(mock_base_fill)
+        
+        # ASSERT: Verify base order fill database updates
+        print(f"\n6. ✅ ASSERT: Verifying base order fill database updates...")
+        
+        updated_base_cycle = get_latest_cycle(test_asset_id)
+        if not updated_base_cycle:
+            print("❌ FAILED: Could not fetch updated base cycle")
+            return False
+        
+        # Expected values for base order fill
+        expected_quantity = Decimal(str(fill_qty))
+        expected_avg_price = Decimal(str(fill_price))
+        expected_last_fill = Decimal(str(fill_price))
+        
+        print(f"✅ SUCCESS: Base order fill processed correctly!")
+        print(f"   Quantity: {updated_base_cycle.quantity} BTC (expected: {expected_quantity})")
+        print(f"   Avg Purchase Price: ${updated_base_cycle.average_purchase_price} (expected: ${expected_avg_price})")
+        print(f"   Last Fill Price: ${updated_base_cycle.last_order_fill_price} (expected: ${expected_last_fill})")
+        print(f"   Safety Orders: {updated_base_cycle.safety_orders} (expected: 0 - base order)")
+        print(f"   Status: {updated_base_cycle.status} (expected: watching)")
+        print(f"   Latest Order ID: {updated_base_cycle.latest_order_id} (expected: None)")
+        
+        # Verify values with tolerance
+        tolerance = Decimal('0.00000001')
+        if (abs(updated_base_cycle.quantity - expected_quantity) > tolerance or
+            abs(updated_base_cycle.average_purchase_price - expected_avg_price) > tolerance or
+            abs(updated_base_cycle.last_order_fill_price - expected_last_fill) > tolerance or
+            updated_base_cycle.safety_orders != 0 or
+            updated_base_cycle.status != 'watching' or
+            updated_base_cycle.latest_order_id is not None):
+            print("❌ FAILED: Base order fill database updates incorrect")
+            return False
+        
+        print("✅ SUCCESS: All base order fill database updates correct!")
+        
+        # TEST 2: Safety Order Fill (quantity > 0)
+        print(f"\n" + "="*60)
+        print("TEST 2: SAFETY ORDER FILL PROCESSING")
+        print("="*60)
+        
+        # SETUP: Create cycle for safety order (quantity > 0, status='buying')
+        print(f"\n7. 🔧 SETUP: Creating cycle for safety order fill test...")
+        
+        safety_order_id = 'test_safety_order_67890'
+        safety_cycle = create_cycle(
+            asset_id=test_asset_id,
+            status='buying',  # Safety order is pending
+            quantity=Decimal('0.00210526'),  # Has position from base order
+            average_purchase_price=Decimal('95000.0'),  # Base order avg
+            safety_orders=0,  # No safety orders filled yet
+            latest_order_id=safety_order_id,  # This safety order is pending
+            last_order_fill_price=Decimal('95000.0')  # Last fill was base order
+        )
+        
+        if not safety_cycle:
+            print("❌ FAILED: Could not create safety order cycle")
+            return False
+        
+        safety_cycle_id = safety_cycle.id
+        print(f"✅ SUCCESS: Created safety order cycle:")
+        print(f"   Cycle ID: {safety_cycle_id}")
+        print(f"   Status: buying (safety order pending)")
+        print(f"   Quantity: {safety_cycle.quantity} BTC (has position)")
+        print(f"   Avg Price: ${safety_cycle.average_purchase_price}")
+        print(f"   Safety Orders: {safety_cycle.safety_orders} (none filled yet)")
+        print(f"   Latest Order ID: {safety_order_id}")
+        
+        # ACTION: Create mock trade update for safety order fill
+        print(f"\n8. 🎯 ACTION: Creating mock safety order fill event...")
+        
+        safety_fill_price = 92000.0  # Safety order filled at lower price
+        safety_fill_qty = 100.0 / safety_fill_price  # $100 / $92,000 = 0.00108696 BTC
+        
+        mock_safety_fill = create_mock_safety_order_fill_event(
+            symbol=test_symbol,
+            order_id=safety_order_id,
+            fill_price=safety_fill_price,
+            fill_qty=safety_fill_qty,
+            total_order_qty=safety_fill_qty,
+            limit_price=92100.0
+        )
+        
+        print(f"   📊 Mock Safety Order Fill:")
+        print(f"   📊 Order ID: {mock_safety_fill.order.id}")
+        print(f"   📊 Fill Price: ${safety_fill_price:,.2f}")
+        print(f"   📊 Fill Quantity: {safety_fill_qty:.8f} BTC")
+        print(f"   📊 Fill Value: ${safety_fill_price * safety_fill_qty:.2f}")
+        
+        # Calculate expected weighted average
+        old_qty = Decimal('0.00210526')
+        old_avg = Decimal('95000.0')
+        new_qty = Decimal(str(safety_fill_qty))
+        new_price = Decimal(str(safety_fill_price))
+        
+        total_qty = old_qty + new_qty
+        expected_new_avg = ((old_avg * old_qty) + (new_price * new_qty)) / total_qty
+        
+        print(f"   📊 Expected Weighted Average Calculation:")
+        print(f"      Old: {old_qty} BTC @ ${old_avg} = ${old_qty * old_avg:.2f}")
+        print(f"      New: {new_qty} BTC @ ${new_price} = ${new_qty * new_price:.2f}")
+        print(f"      Total: {total_qty} BTC @ ${expected_new_avg:.2f}")
+        
+        # ACTION: Process the safety order trade update
+        print(f"\n9. 🎯 ACTION: Processing safety order fill via on_trade_update()...")
+        
+        await on_trade_update(mock_safety_fill)
+        
+        # ASSERT: Verify safety order fill database updates
+        print(f"\n10. ✅ ASSERT: Verifying safety order fill database updates...")
+        
+        updated_safety_cycle = get_latest_cycle(test_asset_id)
+        if not updated_safety_cycle:
+            print("❌ FAILED: Could not fetch updated safety cycle")
+            return False
+        
+        print(f"✅ SUCCESS: Safety order fill processed correctly!")
+        print(f"   Quantity: {updated_safety_cycle.quantity} BTC (expected: {total_qty})")
+        print(f"   Avg Purchase Price: ${updated_safety_cycle.average_purchase_price:.2f} (expected: ${expected_new_avg:.2f})")
+        print(f"   Last Fill Price: ${updated_safety_cycle.last_order_fill_price} (expected: ${new_price})")
+        print(f"   Safety Orders: {updated_safety_cycle.safety_orders} (expected: 1 - incremented)")
+        print(f"   Status: {updated_safety_cycle.status} (expected: watching)")
+        print(f"   Latest Order ID: {updated_safety_cycle.latest_order_id} (expected: None)")
+        
+        # Verify safety order specific updates
+        if (abs(updated_safety_cycle.quantity - total_qty) > tolerance or
+            abs(updated_safety_cycle.average_purchase_price - expected_new_avg) > Decimal('0.01') or
+            abs(updated_safety_cycle.last_order_fill_price - new_price) > tolerance or
+            updated_safety_cycle.safety_orders != 1 or  # Should be incremented
+            updated_safety_cycle.status != 'watching' or
+            updated_safety_cycle.latest_order_id is not None):
+            print("❌ FAILED: Safety order fill database updates incorrect")
+            print(f"   Quantity diff: {abs(updated_safety_cycle.quantity - total_qty)}")
+            print(f"   Avg price diff: {abs(updated_safety_cycle.average_purchase_price - expected_new_avg)}")
+            print(f"   Safety orders: {updated_safety_cycle.safety_orders} (expected: 1)")
+            return False
+        
+        print("✅ SUCCESS: All safety order fill database updates correct!")
+        print("✅ SUCCESS: Safety order count correctly incremented!")
+        print("✅ SUCCESS: Weighted average price correctly calculated!")
+        
+        print(f"\n🎉 PHASE 7 INTEGRATION TEST COMPLETED SUCCESSFULLY!")
+        print("="*80)
+        print("PHASE 7 SUMMARY:")
+        print("✅ Base order fill processing working correctly")
+        print("✅ Safety order fill processing working correctly")
+        print("✅ Weighted average price calculation accurate")
+        print("✅ Safety order count increment working")
+        print("✅ Database state transitions correct")
+        print("✅ latest_order_id clearing working")
+        print("🚀 Phase 7 TradingStream BUY fill functionality is fully operational!")
+        
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ FAILED: Exception during Phase 7 test: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+        
+    finally:
+        # TEARDOWN: Clean up test resources
+        print(f"\n🧹 TEARDOWN: Cleaning up test resources...")
+        
+        # Delete test cycles
+        for cycle_id, cycle_name in [(base_cycle_id, "base"), (safety_cycle_id, "safety")]:
+            if cycle_id:
+                try:
+                    delete_cycle_query = "DELETE FROM dca_cycles WHERE id = %s"
+                    execute_query(delete_cycle_query, (cycle_id,), commit=True)
+                    print(f"   ✅ Deleted {cycle_name} cycle {cycle_id}")
+                except Exception as e:
+                    print(f"   ⚠️ Error deleting {cycle_name} cycle: {e}")
+        
+        # Delete test asset
+        if test_asset_id:
+            try:
+                delete_asset_query = "DELETE FROM dca_assets WHERE id = %s"
+                execute_query(delete_asset_query, (test_asset_id,), commit=True)
+                print(f"   ✅ Deleted test asset {test_asset_id}")
+            except Exception as e:
+                print(f"   ⚠️ Error deleting asset: {e}")
+        
+        print("   ✅ Teardown completed")
+
+
+def run_phase7_test():
+    """Wrapper function to run the async Phase 7 test."""
+    import asyncio
+    return asyncio.run(test_phase7_tradingstream_buy_fill_processing())
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -2724,6 +3090,15 @@ def main():
                 print("\n🎉 Phase 6: ✅ PASSED")
             else:
                 print("\n❌ Phase 6: ❌ FAILED")
+                sys.exit(1)
+            return
+        elif phase_arg == 'phase7':
+            print("\n🎯 Running ONLY Phase 7 tests...")
+            phase7_success = run_phase7_test()
+            if phase7_success:
+                print("\n🎉 Phase 7: ✅ PASSED")
+            else:
+                print("\n❌ Phase 7: ❌ FAILED")
                 sys.exit(1)
             return
         elif phase_arg == 'simulated':
@@ -2813,6 +3188,7 @@ def main():
     phase4_success = False
     phase5_success = False
     phase6_success = False
+    phase7_success = False
     
     # Run Phase 1 tests
     print("\nRunning Phase 1 tests...")
@@ -2838,6 +3214,10 @@ def main():
     print("\nRunning Phase 6 tests...")
     phase6_success = test_phase6_take_profit_order_placement()
     
+    # Run Phase 7 tests (TradingStream BUY order fill processing)
+    print("\nRunning Phase 7 tests...")
+    phase7_success = run_phase7_test()
+    
     # Final results
     print("\n" + "="*60)
     print("INTEGRATION TEST RESULTS SUMMARY")
@@ -2849,8 +3229,9 @@ def main():
     print(f"Phase 4 (Base Order Logic): {'✅ PASSED' if phase4_success else '❌ FAILED'}")
     print(f"Phase 5 (Safety Order Logic): {'✅ PASSED' if phase5_success else '❌ FAILED'}")
     print(f"Phase 6 (Take-Profit Logic): {'✅ PASSED' if phase6_success else '❌ FAILED'}")
+    print(f"Phase 7 (TradingStream BUY Order Fill Processing): {'✅ PASSED' if phase7_success else '❌ FAILED'}")
     
-    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success]):
+    if all([phase1_success, phase2_success, phase3_success, phase4_success, phase5_success, phase6_success, phase7_success]):
         print("\n🎉 ALL PHASES PASSED!")
         print("The DCA Trading Bot is fully functional and ready for production!")
     else:
@@ -2869,6 +3250,7 @@ def print_help():
     print("  python integration_test.py phase4          # Run only Phase 4 (Base Order Logic - SIMULATED)")
     print("  python integration_test.py phase5          # Run only Phase 5 (Safety Order Logic)")
     print("  python integration_test.py phase6          # Run only Phase 6 (Take-Profit Logic)")
+    print("  python integration_test.py phase7          # Run only Phase 7 (TradingStream BUY Order Fill Processing)")
     print("  python integration_test.py simulated       # Run all simulated WebSocket handler tests")
     print("  python integration_test.py sim-base        # Run simulated base order placement test")
     print("  python integration_test.py sim-safety      # Run simulated safety order placement test")
@@ -2883,6 +3265,7 @@ def print_help():
     print("  Phase 4: Tests base order placement logic (SIMULATED - fast execution)")
     print("  Phase 5: Tests safety order placement logic (comprehensive testing)")
     print("  Phase 6: Tests take-profit order placement logic (market SELL orders)")
+    print("  Phase 7: Tests TradingStream BUY order fill processing logic")
     print("\nSIMULATED TEST DESCRIPTIONS:")
     print("  simulated: Run all simulated WebSocket handler tests (fast, no waiting)")
     print("  sim-base: Test MarketDataStream base order placement with mock quote")
