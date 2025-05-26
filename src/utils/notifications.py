@@ -21,7 +21,7 @@ import email.utils
 import logging
 import time
 from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -134,7 +134,7 @@ def send_email_alert(
         
         # Add metadata
         msg['X-DCA-Bot-Priority'] = priority
-        msg['X-DCA-Bot-Timestamp'] = datetime.utcnow().isoformat()
+        msg['X-DCA-Bot-Timestamp'] = datetime.now(timezone.utc).isoformat()
         
         # Send email
         with smtplib.SMTP(config.smtp_server, config.smtp_port) as server:
@@ -192,7 +192,7 @@ def send_trading_alert(
         f"",
         f"Asset: {asset_symbol}",
         f"Event: {event_type}",
-        f"Timestamp: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
         f"",
         f"Details:"
     ]
@@ -237,7 +237,7 @@ def send_system_alert(
         f"",
         f"Component: {component}",
         f"Message: {message}",
-        f"Timestamp: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+        f"Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
         f"Priority: {priority.upper()}",
         f""
     ]
@@ -327,7 +327,7 @@ Configuration:
   From: {config.alert_email_from}
   To: {config.alert_email_to}
 
-Timestamp: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}
+Timestamp: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
 
 If you received this email, your email configuration is working correctly.
 """

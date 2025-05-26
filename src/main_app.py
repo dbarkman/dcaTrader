@@ -17,7 +17,7 @@ import os
 import sys
 from typing import Optional
 from decimal import Decimal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import decimal
 from pathlib import Path
 
@@ -37,7 +37,7 @@ from utils.notifications import alert_order_placed, alert_order_filled, alert_sy
 
 # Import our database models and utilities
 from utils.db_utils import get_db_connection, execute_query
-from models.asset_config import get_asset_config, update_asset_config
+from models.asset_config import get_asset_config, update_asset_config, get_all_enabled_assets
 from models.cycle_data import get_latest_cycle, update_cycle, create_cycle
 from utils.alpaca_client_rest import get_trading_client, place_limit_buy_order, get_positions, place_market_sell_order
 
@@ -283,12 +283,26 @@ def check_and_place_base_order(quote):
                 'timestamp': now
             }
             
+            # Update cycle to 'buying' status with order details
+            try:
+                updates = {
+                    'status': 'buying',
+                    'latest_order_id': str(order.id),  # Convert UUID to string
+                    'latest_order_created_at': now
+                }
+                update_success = update_cycle(latest_cycle.id, updates)
+                if update_success:
+                    logger.info(f"🔄 Updated cycle {latest_cycle.id} to 'buying' status with order {order.id}")
+                else:
+                    logger.warning(f"⚠️ Failed to update cycle {latest_cycle.id} with order {order.id}")
+            except Exception as e:
+                logger.error(f"Error updating cycle for {symbol}: {e}")
+            
             logger.info(f"✅ LIMIT BUY order PLACED for {symbol}:")
             logger.info(f"   Order ID: {order.id}")
             logger.info(f"   Quantity: {order_quantity:.8f}")
             logger.info(f"   Limit Price: ${limit_price:,.4f}")
             logger.info(f"   Time in Force: GTC")
-            # NOTE: We do NOT update the cycle here - that's TradingStream's job when it fills
         else:
             logger.error(f"❌ Failed to place base order for {symbol}")
             
@@ -459,13 +473,27 @@ def check_and_place_safety_order(quote):
                 'timestamp': now
             }
             
+            # Update cycle to 'buying' status with order details
+            try:
+                updates = {
+                    'status': 'buying',
+                    'latest_order_id': str(order.id),  # Convert UUID to string
+                    'latest_order_created_at': now
+                }
+                update_success = update_cycle(latest_cycle.id, updates)
+                if update_success:
+                    logger.info(f"🔄 Updated cycle {latest_cycle.id} to 'buying' status with order {order.id}")
+                else:
+                    logger.warning(f"⚠️ Failed to update cycle {latest_cycle.id} with order {order.id}")
+            except Exception as e:
+                logger.error(f"Error updating cycle for safety order {symbol}: {e}")
+            
             logger.info(f"✅ SAFETY LIMIT BUY order PLACED for {symbol}:")
             logger.info(f"   Order ID: {order.id}")
             logger.info(f"   Quantity: {order_quantity:.8f}")
             logger.info(f"   Limit Price: ${limit_price:,.4f}")
             logger.info(f"   Time in Force: GTC")
             logger.info(f"   🛡️ Safety Order #{latest_cycle.safety_orders + 1} triggered by {price_drop_pct:.2f}% price drop")
-            # NOTE: We do NOT update the cycle here - that's TradingStream's job when it fills
         else:
             logger.error(f"❌ Failed to place safety order for {symbol}")
             
@@ -643,7 +671,7 @@ def check_and_place_take_profit_order(quote):
             from datetime import timezone
             updates = {
                 'status': 'selling',
-                'latest_order_id': order.id,
+                'latest_order_id': str(order.id),  # Convert UUID to string
                 'latest_order_created_at': datetime.now(timezone.utc)
             }
             
@@ -1074,7 +1102,7 @@ async def update_cycle_on_sell_fill(order, trade_update):
         
         updates_current = {
             'status': 'complete',
-            'completed_at': datetime.utcnow(),
+            'completed_at': datetime.now(timezone.utc),
             'latest_order_id': None,
             'latest_order_created_at': None  # Clear the order timestamp
         }
@@ -1350,7 +1378,7 @@ async def update_cycle_on_order_cancellation(order, event):
             
             if should_complete_cycle:
                 updates['status'] = 'complete'
-                updates['completed_at'] = datetime.utcnow()
+                updates['completed_at'] = datetime.now(timezone.utc)
                 updates['quantity'] = Decimal('0')
                 
                 # Determine best price for last_sell_price
@@ -1496,24 +1524,43 @@ def setup_crypto_stream() -> CryptoDataStream:
         secret_key=api_secret
     )
     
-    # List of most popular crypto pairs to monitor (limited to avoid symbol limit)
-    crypto_symbols = [
-        'BTC/USD',   # Bitcoin
-        'ETH/USD',   # Ethereum
-        'SOL/USD',   # Solana
-        'DOGE/USD',  # Dogecoin
-        'AVAX/USD',  # Avalanche
-        'LINK/USD',  # Chainlink
-        'UNI/USD',   # Uniswap
-        'XRP/USD'    # Ripple
-    ]
+    # Get enabled assets from database
+    try:
+        from models.asset_config import get_all_enabled_assets
+        enabled_assets = get_all_enabled_assets()
+        crypto_symbols = [asset.asset_symbol for asset in enabled_assets]
+        
+        if not crypto_symbols:
+            logger.warning("No enabled assets found in database - using fallback symbols")
+            crypto_symbols = ['BTC/USD', 'ETH/USD']  # Minimal fallback
+        
+        logger.info(f"Loaded {len(crypto_symbols)} enabled assets from database")
+        
+    except Exception as e:
+        logger.error(f"Error loading enabled assets from database: {e}")
+        logger.warning("Using fallback crypto symbols")
+        crypto_symbols = [
+            'BTC/USD',   # Bitcoin
+            'ETH/USD',   # Ethereum
+            'SOL/USD',   # Solana
+            'DOGE/USD',  # Dogecoin
+            'AVAX/USD',  # Avalanche
+            'LINK/USD',  # Chainlink
+            'UNI/USD',   # Uniswap
+            'XRP/USD'    # Ripple
+        ]
+    
+    # Check WebSocket subscription limits (30 symbols max for free plan)
+    if len(crypto_symbols) > 30:
+        logger.warning(f"Too many symbols ({len(crypto_symbols)}) for WebSocket limit (30). Using first 30.")
+        crypto_symbols = crypto_symbols[:30]
     
     # Subscribe to quotes and trades for selected crypto symbols
     for symbol in crypto_symbols:
         stream.subscribe_quotes(on_crypto_quote, symbol)
         stream.subscribe_trades(on_crypto_trade, symbol)
     
-    logger.info(f"Subscribed to quotes and trades for {len(crypto_symbols)} popular crypto pairs:")
+    logger.info(f"Subscribed to quotes and trades for {len(crypto_symbols)} crypto pairs:")
     logger.info(f"Symbols: {', '.join(crypto_symbols)}")
     
     # Optionally subscribe to bars for minute-by-minute data
