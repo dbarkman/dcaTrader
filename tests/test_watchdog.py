@@ -304,32 +304,38 @@ class TestWatchdog(unittest.TestCase):
                 # Should not raise exception
                 watchdog.cleanup_stale_resources()
     
+    @patch('watchdog.is_maintenance_mode')
     @patch('watchdog.is_main_app_running')
     @patch('watchdog.logger')
-    def test_main_app_running(self, mock_logger, mock_is_running):
+    def test_main_app_running(self, mock_logger, mock_is_running, mock_maintenance):
         """Test main function when app is already running."""
+        mock_maintenance.return_value = False  # Not in maintenance mode
         mock_is_running.return_value = (True, self.test_pid)
         
         watchdog.main()
         
+        mock_maintenance.assert_called_once()
         mock_is_running.assert_called_once()
         # Check that appropriate log messages were called
         mock_logger.info.assert_any_call(f"✅ main_app.py is running (PID: {self.test_pid})")
         mock_logger.info.assert_any_call("🔍 No action needed - application is healthy")
     
+    @patch('watchdog.is_maintenance_mode')
     @patch('watchdog.is_main_app_running')
     @patch('watchdog.cleanup_stale_resources')
     @patch('watchdog.start_main_app')
     @patch('watchdog.send_email_alert')
     @patch('watchdog.logger')
     def test_main_app_not_running_restart_success(self, mock_logger, mock_email, 
-                                                  mock_start, mock_cleanup, mock_is_running):
+                                                  mock_start, mock_cleanup, mock_is_running, mock_maintenance):
         """Test main function when app is not running and restart succeeds."""
+        mock_maintenance.return_value = False  # Not in maintenance mode
         mock_is_running.return_value = (False, None)
         mock_start.return_value = True
         
         watchdog.main()
         
+        mock_maintenance.assert_called_once()
         mock_is_running.assert_called_once()
         mock_cleanup.assert_called_once()
         mock_start.assert_called_once()
@@ -339,6 +345,7 @@ class TestWatchdog(unittest.TestCase):
         )
         mock_logger.info.assert_any_call("✅ Successfully restarted main_app.py")
     
+    @patch('watchdog.is_maintenance_mode')
     @patch('watchdog.is_main_app_running')
     @patch('watchdog.cleanup_stale_resources')
     @patch('watchdog.start_main_app')
@@ -346,13 +353,15 @@ class TestWatchdog(unittest.TestCase):
     @patch('watchdog.logger')
     @patch('sys.exit')
     def test_main_app_not_running_restart_failure(self, mock_exit, mock_logger, mock_email, 
-                                                  mock_start, mock_cleanup, mock_is_running):
+                                                  mock_start, mock_cleanup, mock_is_running, mock_maintenance):
         """Test main function when app is not running and restart fails."""
+        mock_maintenance.return_value = False  # Not in maintenance mode
         mock_is_running.return_value = (False, None)
         mock_start.return_value = False
         
         watchdog.main()
         
+        mock_maintenance.assert_called_once()
         mock_is_running.assert_called_once()
         mock_cleanup.assert_called_once()
         mock_start.assert_called_once()
@@ -363,21 +372,41 @@ class TestWatchdog(unittest.TestCase):
         mock_logger.error.assert_any_call("❌ Failed to restart main_app.py")
         mock_exit.assert_called_once_with(1)
     
+    @patch('watchdog.is_maintenance_mode')
     @patch('watchdog.is_main_app_running')
     @patch('watchdog.send_email_alert')
     @patch('watchdog.logger')
     @patch('sys.exit')
-    def test_main_exception_handling(self, mock_exit, mock_logger, mock_email, mock_is_running):
+    def test_main_exception_handling(self, mock_exit, mock_logger, mock_email, mock_is_running, mock_maintenance):
         """Test main function exception handling."""
+        mock_maintenance.return_value = False  # Not in maintenance mode
         mock_is_running.side_effect = Exception("Unexpected error")
         
         watchdog.main()
         
+        mock_maintenance.assert_called_once()
         mock_email.assert_called_once()
         # Check that the email contains the error message
         args, kwargs = mock_email.call_args
         self.assertIn("Unexpected error", args[1])
         mock_exit.assert_called_once_with(1)
+
+    @patch('watchdog.is_maintenance_mode')
+    @patch('watchdog.is_main_app_running')
+    @patch('watchdog.logger')
+    def test_main_maintenance_mode_enabled(self, mock_logger, mock_is_running, mock_maintenance):
+        """Test main function when maintenance mode is enabled."""
+        mock_maintenance.return_value = True  # Maintenance mode enabled
+        
+        watchdog.main()
+        
+        mock_maintenance.assert_called_once()
+        # Should not call is_main_app_running when in maintenance mode
+        mock_is_running.assert_not_called()
+        # Check that appropriate log messages were called
+        mock_logger.info.assert_any_call("🔧 Maintenance mode is ENABLED")
+        mock_logger.info.assert_any_call("⏸️ Watchdog is PAUSED - will not restart main app")
+        mock_logger.info.assert_any_call("ℹ️ Use 'python scripts/app_control.py maintenance off' to resume")
 
 
 if __name__ == '__main__':

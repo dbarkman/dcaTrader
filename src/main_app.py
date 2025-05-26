@@ -1524,31 +1524,53 @@ def setup_crypto_stream() -> CryptoDataStream:
         secret_key=api_secret
     )
     
-    # Get enabled assets from database
-    try:
-        from models.asset_config import get_all_enabled_assets
-        enabled_assets = get_all_enabled_assets()
-        crypto_symbols = [asset.asset_symbol for asset in enabled_assets]
-        
-        if not crypto_symbols:
-            logger.warning("No enabled assets found in database - using fallback symbols")
-            crypto_symbols = ['BTC/USD', 'ETH/USD']  # Minimal fallback
-        
-        logger.info(f"Loaded {len(crypto_symbols)} enabled assets from database")
-        
-    except Exception as e:
-        logger.error(f"Error loading enabled assets from database: {e}")
-        logger.warning("Using fallback crypto symbols")
+    # Check if we're in integration test mode
+    if os.getenv('INTEGRATION_TEST_MODE') == 'true':
+        logger.info("INTEGRATION_TEST_MODE detected - using hardcoded test assets")
         crypto_symbols = [
             'BTC/USD',   # Bitcoin
             'ETH/USD',   # Ethereum
+            'XRP/USD',   # Ripple
             'SOL/USD',   # Solana
             'DOGE/USD',  # Dogecoin
-            'AVAX/USD',  # Avalanche
             'LINK/USD',  # Chainlink
+            'AVAX/USD',  # Avalanche
+            'SHIB/USD',  # Shiba Inu
+            'BCH/USD',   # Bitcoin Cash
+            'LTC/USD',   # Litecoin
+            'DOT/USD',   # Polkadot
+            'PEPE/USD',  # Pepe
+            'AAVE/USD',  # Aave
             'UNI/USD',   # Uniswap
-            'XRP/USD'    # Ripple
+            'TRUMP/USD'  # Trump
         ]
+        logger.info(f"Using {len(crypto_symbols)} hardcoded test assets")
+    else:
+        # Get enabled assets from database
+        try:
+            from models.asset_config import get_all_enabled_assets
+            enabled_assets = get_all_enabled_assets()
+            crypto_symbols = [asset.asset_symbol for asset in enabled_assets]
+            
+            if not crypto_symbols:
+                logger.warning("No enabled assets found in database - using fallback symbols")
+                crypto_symbols = ['BTC/USD', 'ETH/USD']  # Minimal fallback
+            
+            logger.info(f"Loaded {len(crypto_symbols)} enabled assets from database")
+            
+        except Exception as e:
+            logger.error(f"Error loading enabled assets from database: {e}")
+            logger.warning("Using fallback crypto symbols")
+            crypto_symbols = [
+                'BTC/USD',   # Bitcoin
+                'ETH/USD',   # Ethereum
+                'SOL/USD',   # Solana
+                'DOGE/USD',  # Dogecoin
+                'AVAX/USD',  # Avalanche
+                'LINK/USD',  # Chainlink
+                'UNI/USD',   # Uniswap
+                'XRP/USD'    # Ripple
+            ]
     
     # Check WebSocket subscription limits (30 symbols max for free plan)
     if len(crypto_symbols) > 30:

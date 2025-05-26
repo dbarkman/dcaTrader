@@ -844,9 +844,10 @@ def test_phase3_websocket_connection_and_data_receipt():
     try:
         print("\n1. 🚀 Starting main_app.py subprocess...")
         
-        # Set up environment with TESTING_MODE for aggressive pricing
+        # Set up environment with TESTING_MODE for aggressive pricing and INTEGRATION_TEST_MODE for hardcoded assets
         test_env = os.environ.copy()
         test_env['TESTING_MODE'] = 'true'  # Enable aggressive pricing (5% above ask)
+        test_env['INTEGRATION_TEST_MODE'] = 'true'  # Use hardcoded 15 crypto assets for testing
         
         # Start main_app.py as subprocess
         main_process = subprocess.Popen(
@@ -854,7 +855,7 @@ def test_phase3_websocket_connection_and_data_receipt():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=os.getcwd(),
-            env=test_env  # Use modified environment with TESTING_MODE
+            env=test_env  # Use modified environment with TESTING_MODE and INTEGRATION_TEST_MODE
         )
         
         results['process_started'] = True
@@ -1166,6 +1167,8 @@ def test_phase4_simulated_base_order_placement():
         # ASSERT: Verify base order was placed
         print(f"\n6. ✅ ASSERT: Verifying base order placement...")
         
+        order_id = None  # Initialize order_id variable
+        
         # Check if order was tracked in recent_orders
         if test_symbol in main_app.recent_orders:
             recent_order_info = main_app.recent_orders[test_symbol]
@@ -1205,18 +1208,33 @@ def test_phase4_simulated_base_order_placement():
             print("❌ FAILED: Base order was not placed (not tracked in recent_orders)")
             return False
         
-        # ASSERT: Verify cycle database remains unchanged (MarketDataStream doesn't update DB)
-        print(f"\n7. ✅ ASSERT: Verifying cycle database unchanged...")
+        # ASSERT: Verify cycle database was correctly updated after order placement
+        print(f"\n7. ✅ ASSERT: Verifying cycle database was correctly updated...")
         
         current_cycle = get_latest_cycle(test_asset_id)
-        if (current_cycle.quantity != Decimal('0') or 
-            current_cycle.status != 'watching' or
-            current_cycle.average_purchase_price != Decimal('0')):
-            print("❌ FAILED: Cycle was incorrectly modified by MarketDataStream")
+        if current_cycle.status != 'buying':
+            print(f"❌ FAILED: Cycle status should be 'buying', got '{current_cycle.status}'")
             return False
         
-        print("✅ SUCCESS: Cycle database correctly unchanged")
-        print("   ℹ️ Note: TradingStream will update cycle when order fills")
+        if order_id and str(current_cycle.latest_order_id) != str(order_id):
+            print(f"❌ FAILED: Cycle latest_order_id should be '{order_id}', got '{current_cycle.latest_order_id}'")
+            print(f"   Debug: order_id type={type(order_id)}, latest_order_id type={type(current_cycle.latest_order_id)}")
+            print(f"   Debug: order_id repr={repr(order_id)}, latest_order_id repr={repr(current_cycle.latest_order_id)}")
+            return False
+        
+        # Quantity and average_purchase_price should still be 0 until order fills
+        if current_cycle.quantity != Decimal('0'):
+            print(f"❌ FAILED: Cycle quantity should still be 0 until order fills, got '{current_cycle.quantity}'")
+            return False
+        
+        if current_cycle.average_purchase_price != Decimal('0'):
+            print(f"❌ FAILED: Cycle average_purchase_price should still be 0 until order fills, got '{current_cycle.average_purchase_price}'")
+            return False
+        
+        print("✅ SUCCESS: Cycle database correctly updated after order placement")
+        print(f"   Status: 'buying' (order placed)")
+        print(f"   Order ID: {current_cycle.latest_order_id}")
+        print("   ℹ️ Note: TradingStream will update quantity/price when order fills")
         
         print(f"\n🎉 PHASE 4 SIMULATED TEST COMPLETED SUCCESSFULLY!")
         print("✅ Base order placement logic working correctly")
@@ -4810,6 +4828,17 @@ def test_phase13_watchdog_restarts_app():
             return False
         print(f"✅ Watchdog script found: {watchdog_script}")
         
+        print("\n🔧 Step 1.5: Ensuring maintenance mode is disabled...")
+        maintenance_file = Path(__file__).parent / '.maintenance'
+        if maintenance_file.exists():
+            try:
+                maintenance_file.unlink()
+                print(f"   ✅ Removed maintenance mode file: {maintenance_file}")
+            except Exception as e:
+                print(f"   ⚠️ Could not remove maintenance mode file: {e}")
+        else:
+            print("   ✅ Maintenance mode is already disabled")
+        
         print("\n🔧 Step 2: Ensuring main_app.py is NOT running...")
         # Clean up any existing PID file
         if pid_file.exists():
@@ -4985,6 +5014,15 @@ def test_phase13_watchdog_restarts_app():
                 print(f"   ✅ Removed PID file: {pid_file}")
             except Exception as e:
                 print(f"   ⚠️ Could not remove PID file: {e}")
+        
+        # Remove maintenance mode file if it exists
+        maintenance_file = Path(__file__).parent / '.maintenance'
+        if maintenance_file.exists():
+            try:
+                maintenance_file.unlink()
+                print(f"   ✅ Removed maintenance mode file: {maintenance_file}")
+            except Exception as e:
+                print(f"   ⚠️ Could not remove maintenance mode file: {e}")
 
 
 def run_phase13_test():
