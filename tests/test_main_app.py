@@ -266,5 +266,5 @@ async def test_on_trade_update_handler_with_execution(caplog):
     assert any('📨 Trade Update: PARTIAL_FILL - ETH/USD' in msg for msg in log_messages)
     assert any('Order ID: test_order_456' in msg for msg in log_messages)
     assert any('💰 EXECUTION DETAILS:' in msg for msg in log_messages)
-    assert any('Fill Price: $50,000.2500' in msg for msg in log_messages)
+    assert any('Fill Price: $50,000.25' in msg for msg in log_messages)
     assert any('Fill Quantity: 0.1' in msg for msg in log_messages) 

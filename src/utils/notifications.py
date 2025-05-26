@@ -29,6 +29,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import get_config
+from utils.formatting import format_price, format_quantity
 
 config = get_config()
 logger = logging.getLogger(__name__)
@@ -350,9 +351,9 @@ def alert_order_placed(asset_symbol: str, order_type: str, order_id: str, quanti
         f"{order_type.upper()} ORDER PLACED",
         {
             'Order ID': order_id,
-            'Quantity': f"{quantity:.8f}",
-            'Price': f"${price:,.2f}",
-            'Total Value': f"${quantity * price:,.2f}"
+            'Quantity': format_quantity(quantity),
+            'Price': format_price(price),
+            'Total Value': format_price(quantity * price)
         }
     )
 
@@ -364,9 +365,9 @@ def alert_order_filled(asset_symbol: str, order_type: str, order_id: str, fill_p
         f"{order_type.upper()} ORDER FILLED",
         {
             'Order ID': order_id,
-            'Fill Price': f"${fill_price:,.2f}",
-            'Quantity': f"{quantity:.8f}",
-            'Total Value': f"${quantity * fill_price:,.2f}"
+            'Fill Price': format_price(fill_price),
+            'Quantity': format_quantity(quantity),
+            'Total Value': format_price(quantity * fill_price)
         }
     )
 

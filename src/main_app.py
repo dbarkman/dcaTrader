@@ -40,6 +40,7 @@ from utils.db_utils import get_db_connection, execute_query
 from models.asset_config import get_asset_config, update_asset_config, get_all_enabled_assets
 from models.cycle_data import get_latest_cycle, update_cycle, create_cycle
 from utils.alpaca_client_rest import get_trading_client, place_limit_buy_order, get_positions, place_market_sell_order
+from utils.formatting import format_price, format_quantity, format_percentage
 
 # Initialize configuration and logging
 config = get_config()
@@ -247,8 +248,8 @@ def check_and_place_base_order(quote):
         spread_pct = (spread / bid_price) * 100 if bid_price > 0 else 0
         
         logger.info(f"📊 Market Data for {symbol}:")
-        logger.info(f"   Bid: ${bid_price:,.4f} | Ask: ${ask_price:,.4f} | Spread: ${spread:.4f} ({spread_pct:.3f}%)")
-        logger.info(f"   Order Amount: ${base_order_usd} ÷ ${ask_price:,.4f} = {order_quantity:.8f} {symbol.split('/')[0]}")
+        logger.info(f"   Bid: {format_price(bid_price)} | Ask: {format_price(ask_price)} | Spread: {format_price(spread)} ({spread_pct:.3f}%)")
+        logger.info(f"   Order Amount: ${base_order_usd} ÷ {format_price(ask_price)} = {format_quantity(order_quantity)} {symbol.split('/')[0]}")
         
         # Step 9: Place the base limit buy order with detailed logging
         
@@ -258,8 +259,8 @@ def check_and_place_base_order(quote):
             # Use 5% above ask for aggressive fills during testing
             aggressive_price = ask_price * 1.05
             logger.info(f"🚀 TESTING MODE: Using aggressive pricing (5% above ask)")
-            logger.info(f"   Ask Price: ${ask_price:,.4f}")
-            logger.info(f"   Aggressive Price: ${aggressive_price:,.4f} (+5%)")
+            logger.info(f"   Ask Price: {format_price(ask_price)}")
+            logger.info(f"   Aggressive Price: {format_price(aggressive_price)} (+5%)")
             limit_price = aggressive_price
         else:
             # Normal production mode: use ask price
@@ -267,8 +268,8 @@ def check_and_place_base_order(quote):
         
         logger.info(f"🔄 Placing LIMIT BUY order for {symbol}:")
         logger.info(f"   Type: LIMIT | Side: BUY")
-        logger.info(f"   Limit Price: ${limit_price:,.4f} {'(AGGRESSIVE +5%)' if testing_mode else '(current ask)'}")
-        logger.info(f"   Quantity: {order_quantity:.8f}")
+        logger.info(f"   Limit Price: {format_price(limit_price)} {'(AGGRESSIVE +5%)' if testing_mode else '(current ask)'}")
+        logger.info(f"   Quantity: {format_quantity(order_quantity)}")
         logger.info(f"   Total Value: ${base_order_usd}")
         
         order = place_limit_buy_order(
@@ -303,8 +304,8 @@ def check_and_place_base_order(quote):
             
             logger.info(f"✅ LIMIT BUY order PLACED for {symbol}:")
             logger.info(f"   Order ID: {order.id}")
-            logger.info(f"   Quantity: {order_quantity:.8f}")
-            logger.info(f"   Limit Price: ${limit_price:,.4f}")
+            logger.info(f"   Quantity: {format_quantity(order_quantity)}")
+            logger.info(f"   Limit Price: {format_price(limit_price)}")
             logger.info(f"   Time in Force: GTC")
         else:
             logger.error(f"❌ Failed to place base order for {symbol}")
@@ -391,12 +392,12 @@ def check_and_place_safety_order(quote):
         logger.debug(f"   Safety Orders: {latest_cycle.safety_orders}/{asset_config.max_safety_orders}")
         logger.debug(f"   Last Fill Price: ${latest_cycle.last_order_fill_price}")
         logger.debug(f"   Safety Deviation: {asset_config.safety_order_deviation}%")
-        logger.debug(f"   Trigger Price: ${trigger_price:.4f}")
+        logger.debug(f"   Trigger Price: {format_price(trigger_price)}")
         logger.debug(f"   Current Ask: ${ask_price}")
         
         # Step 8: Check if current ask price has dropped enough to trigger safety order
         if ask_price_decimal > trigger_price:
-            logger.debug(f"Ask price ${ask_price} > trigger ${trigger_price:.4f} - no safety order needed")
+            logger.debug(f"Ask price ${ask_price} > trigger {format_price(trigger_price)} - no safety order needed")
             return
         
         logger.info(f"🛡️ Safety order conditions met for {symbol}!")
@@ -434,11 +435,11 @@ def check_and_place_safety_order(quote):
         price_drop_pct = (price_drop / latest_cycle.last_order_fill_price) * Decimal('100')
         
         logger.info(f"📊 Safety Order Analysis for {symbol}:")
-        logger.info(f"   Last Fill: ${latest_cycle.last_order_fill_price:.4f} | Current Ask: ${ask_price:,.4f}")
-        logger.info(f"   Price Drop: ${price_drop:.4f} ({price_drop_pct:.2f}%)")
-        logger.info(f"   Trigger at: ${trigger_price:.4f} ({asset_config.safety_order_deviation}% drop)")
+        logger.info(f"   Last Fill: {format_price(latest_cycle.last_order_fill_price)} | Current Ask: {format_price(ask_price)}")
+        logger.info(f"   Price Drop: {format_price(price_drop)} ({price_drop_pct:.2f}%)")
+        logger.info(f"   Trigger at: {format_price(trigger_price)} ({asset_config.safety_order_deviation}% drop)")
         logger.info(f"   Safety Orders: {latest_cycle.safety_orders + 1}/{asset_config.max_safety_orders}")
-        logger.info(f"   Order Amount: ${safety_order_usd} ÷ ${ask_price:,.4f} = {order_quantity:.8f} {symbol.split('/')[0]}")
+        logger.info(f"   Order Amount: ${safety_order_usd} ÷ {format_price(ask_price)} = {format_quantity(order_quantity)} {symbol.split('/')[0]}")
         
         # Step 12: Place the safety limit buy order with detailed logging
         
@@ -448,8 +449,8 @@ def check_and_place_safety_order(quote):
             # Use 5% above ask for aggressive fills during testing
             aggressive_price = ask_price * 1.05
             logger.info(f"🚀 TESTING MODE: Using aggressive pricing (5% above ask)")
-            logger.info(f"   Ask Price: ${ask_price:,.4f}")
-            logger.info(f"   Aggressive Price: ${aggressive_price:,.4f} (+5%)")
+            logger.info(f"   Ask Price: {format_price(ask_price)}")
+            logger.info(f"   Aggressive Price: {format_price(aggressive_price)} (+5%)")
             limit_price = aggressive_price
         else:
             # Normal production mode: use ask price
@@ -457,8 +458,8 @@ def check_and_place_safety_order(quote):
         
         logger.info(f"🔄 Placing SAFETY LIMIT BUY order for {symbol}:")
         logger.info(f"   Type: LIMIT | Side: BUY | Order Type: SAFETY #{latest_cycle.safety_orders + 1}")
-        logger.info(f"   Limit Price: ${limit_price:,.4f} {'(AGGRESSIVE +5%)' if testing_mode else '(current ask)'}")
-        logger.info(f"   Quantity: {order_quantity:.8f}")
+        logger.info(f"   Limit Price: {format_price(limit_price)} {'(AGGRESSIVE +5%)' if testing_mode else '(current ask)'}")
+        logger.info(f"   Quantity: {format_quantity(order_quantity)}")
         logger.info(f"   Total Value: ${safety_order_usd}")
         
         order = place_limit_buy_order(
@@ -493,8 +494,8 @@ def check_and_place_safety_order(quote):
             
             logger.info(f"✅ SAFETY LIMIT BUY order PLACED for {symbol}:")
             logger.info(f"   Order ID: {order.id}")
-            logger.info(f"   Quantity: {order_quantity:.8f}")
-            logger.info(f"   Limit Price: ${limit_price:,.4f}")
+            logger.info(f"   Quantity: {format_quantity(order_quantity)}")
+            logger.info(f"   Limit Price: {format_price(limit_price)}")
             logger.info(f"   Time in Force: GTC")
             logger.info(f"   🛡️ Safety Order #{latest_cycle.safety_orders + 1} triggered by {price_drop_pct:.2f}% price drop")
         else:
@@ -584,7 +585,7 @@ def check_and_place_take_profit_order(quote):
             
             if ask_price_decimal <= safety_trigger_price:
                 safety_order_would_trigger = True
-                logger.debug(f"Safety order would trigger for {symbol} (ask ${ask_price} <= trigger ${safety_trigger_price:.4f}) - skipping take-profit")
+                logger.debug(f"Safety order would trigger for {symbol} (ask ${ask_price} <= trigger {format_price(safety_trigger_price)}) - skipping take-profit")
                 return
         
         # Step 7: Calculate take-profit trigger price
@@ -598,13 +599,13 @@ def check_and_place_take_profit_order(quote):
         logger.debug(f"   Status: {latest_cycle.status} | Quantity: {latest_cycle.quantity}")
         logger.debug(f"   Average Purchase Price: ${latest_cycle.average_purchase_price}")
         logger.debug(f"   Take Profit %: {asset_config.take_profit_percent}%")
-        logger.debug(f"   Take Profit Trigger: ${take_profit_trigger_price:.4f}")
+        logger.debug(f"   Take Profit Trigger: {format_price(take_profit_trigger_price)}")
         logger.debug(f"   Current Bid: ${bid_price}")
         logger.debug(f"   Safety Order Would Trigger: {safety_order_would_trigger}")
         
         # Step 8: Check if current bid price has risen enough to trigger take-profit
         if bid_price_decimal < take_profit_trigger_price:
-            logger.debug(f"Bid price ${bid_price} < take-profit trigger ${take_profit_trigger_price:.4f} - no take-profit needed")
+            logger.debug(f"Bid price ${bid_price} < take-profit trigger {format_price(take_profit_trigger_price)} - no take-profit needed")
             return
         
         logger.info(f"💰 Take-profit conditions met for {symbol}!")
@@ -637,8 +638,8 @@ def check_and_place_take_profit_order(quote):
         # Log quantity comparison for debugging
         db_quantity = float(latest_cycle.quantity)
         if abs(sell_quantity - db_quantity) > 0.000001:  # Allow for small floating point differences
-            logger.warning(f"Quantity mismatch for {symbol}: DB={db_quantity:.8f}, Alpaca={sell_quantity:.8f}")
-            logger.info(f"Using Alpaca position quantity for accuracy: {sell_quantity:.8f}")
+            logger.warning(f"Quantity mismatch for {symbol}: DB={format_quantity(db_quantity)}, Alpaca={format_quantity(sell_quantity)}")
+            logger.info(f"Using Alpaca position quantity for accuracy: {format_quantity(sell_quantity)}")
         
         # Enhanced logging for take-profit order
         price_gain = bid_price_decimal - latest_cycle.average_purchase_price
@@ -648,9 +649,9 @@ def check_and_place_take_profit_order(quote):
         estimated_profit = estimated_proceeds - estimated_cost
         
         logger.info(f"📊 Take-Profit Analysis for {symbol}:")
-        logger.info(f"   Avg Purchase: ${latest_cycle.average_purchase_price:.4f} | Current Bid: ${bid_price:,.4f}")
-        logger.info(f"   Price Gain: ${price_gain:.4f} ({price_gain_pct:.2f}%)")
-        logger.info(f"   Take-Profit Trigger: ${take_profit_trigger_price:.4f} ({asset_config.take_profit_percent}% gain)")
+        logger.info(f"   Avg Purchase: {format_price(latest_cycle.average_purchase_price)} | Current Bid: {format_price(bid_price)}")
+        logger.info(f"   Price Gain: {format_price(price_gain)} ({price_gain_pct:.2f}%)")
+        logger.info(f"   Take-Profit Trigger: {format_price(take_profit_trigger_price)} ({asset_config.take_profit_percent}% gain)")
         logger.info(f"   Position: {latest_cycle.quantity} {symbol.split('/')[0]}")
         logger.info(f"   Est. Proceeds: ${estimated_proceeds:.2f} | Est. Cost: ${estimated_cost:.2f}")
         logger.info(f"   Est. Profit: ${estimated_profit:.2f}")
@@ -658,8 +659,8 @@ def check_and_place_take_profit_order(quote):
         # Step 12: Place the market sell order
         logger.info(f"🔄 Placing MARKET SELL order for {symbol}:")
         logger.info(f"   Type: MARKET | Side: SELL | Order Type: TAKE-PROFIT")
-        logger.info(f"   Quantity: {sell_quantity:.8f}")
-        logger.info(f"   Current Bid: ${bid_price:,.4f}")
+        logger.info(f"   Quantity: {format_quantity(sell_quantity)}")
+        logger.info(f"   Current Bid: {format_price(bid_price)}")
         logger.info(f"   💰 Selling entire position at market price")
         
         order = place_market_sell_order(
@@ -678,7 +679,7 @@ def check_and_place_take_profit_order(quote):
             
             logger.info(f"✅ MARKET SELL order PLACED for {symbol}:")
             logger.info(f"   Order ID: {order.id}")
-            logger.info(f"   Quantity: {sell_quantity:.8f}")
+            logger.info(f"   Quantity: {format_quantity(sell_quantity)}")
             logger.info(f"   Order Type: MARKET")
             logger.info(f"   💰 Take-profit triggered by {price_gain_pct:.2f}% gain")
             
@@ -750,7 +751,7 @@ async def on_trade_update(trade_update):
         # Safely handle limit_price - it might be a string
         try:
             limit_price_float = float(order.limit_price)
-            logger.info(f"   Limit Price: ${limit_price_float:,.4f}")
+            logger.info(f"   Limit Price: {format_price(limit_price_float)}")
         except (ValueError, TypeError):
             logger.info(f"   Limit Price: {order.limit_price}")
     
@@ -767,7 +768,7 @@ async def on_trade_update(trade_update):
                 
                 logger.info(f"💰 EXECUTION DETAILS:")
                 logger.info(f"   Execution ID: {trade_update.execution_id}")
-                logger.info(f"   Fill Price: ${price_float:,.4f}")
+                logger.info(f"   Fill Price: {format_price(price_float)}")
                 logger.info(f"   Fill Quantity: {qty_float}")
                 logger.info(f"   Fill Value: ${total_value:,.2f}")
                 
@@ -930,7 +931,7 @@ async def update_cycle_on_buy_fill(order, trade_update):
             alpaca_qty = Decimal(str(alpaca_position.qty))
             alpaca_avg_price = Decimal(str(alpaca_position.avg_entry_price))
             
-            logger.info(f"📊 Syncing with Alpaca position: {alpaca_qty} @ ${alpaca_avg_price:.4f}")
+            logger.info(f"📊 Syncing with Alpaca position: {alpaca_qty} @ {format_price(alpaca_avg_price)}")
             
             updates = {
                 'quantity': alpaca_qty,
@@ -981,8 +982,8 @@ async def update_cycle_on_buy_fill(order, trade_update):
             
             logger.info(f"✅ Cycle database updated successfully for {symbol}:")
             logger.info(f"   🔄 Total Quantity: {final_quantity}")
-            logger.info(f"   💰 Avg Purchase Price: ${final_avg_price:.4f}")
-            logger.info(f"   📊 Last Fill Price: ${avg_fill_price:.4f}")
+            logger.info(f"   💰 Avg Purchase Price: {format_price(final_avg_price)}")
+            logger.info(f"   📊 Last Fill Price: {format_price(avg_fill_price)}")
             logger.info(f"   🛡️ Safety Orders: {final_safety_orders}")
             logger.info(f"   📈 Order Type: {'Safety Order' if is_safety_order else 'Base Order'}")
             logger.info(f"   ⚡ Status: watching (ready for take-profit)")
@@ -1103,7 +1104,7 @@ async def update_cycle_on_sell_fill(order, trade_update):
             logger.error(f"❌ Invalid fill price: {avg_fill_price}")
             return
         
-        logger.info(f"💰 Take-profit SELL filled at ${avg_fill_price:.4f}")
+        logger.info(f"💰 Take-profit SELL filled at {format_price(avg_fill_price)}")
         
         # Step 3.5: Verify Alpaca position (optional but good for logging/verification)
         client = get_trading_client()
@@ -1146,7 +1147,7 @@ async def update_cycle_on_sell_fill(order, trade_update):
             logger.error(f"❌ Failed to update last_sell_price for asset {asset_config.id}")
             return
         
-        logger.info(f"✅ Updated {symbol} last_sell_price to ${avg_fill_price:.4f}")
+        logger.info(f"✅ Updated {symbol} last_sell_price to {format_price(avg_fill_price)}")
         
         # Step 6: Create new 'cooldown' cycle
         new_cooldown_cycle = create_cycle(
@@ -1168,11 +1169,11 @@ async def update_cycle_on_sell_fill(order, trade_update):
         
         # Step 7: Log completion summary
         logger.info(f"🎉 TAKE-PROFIT COMPLETED for {symbol}:")
-        logger.info(f"   💰 Sell Price: ${avg_fill_price:.4f}")
-        logger.info(f"   📈 Avg Purchase Price: ${current_cycle.average_purchase_price:.4f}")
+        logger.info(f"   💰 Sell Price: {format_price(avg_fill_price)}")
+        logger.info(f"   📈 Avg Purchase Price: {format_price(current_cycle.average_purchase_price)}")
         profit_amount = avg_fill_price - current_cycle.average_purchase_price
         profit_percent = (profit_amount / current_cycle.average_purchase_price) * 100
-        logger.info(f"   💵 Profit per unit: ${profit_amount:.4f} ({profit_percent:.2f}%)")
+        logger.info(f"   💵 Profit per unit: {format_price(profit_amount)} ({profit_percent:.2f}%)")
         logger.info(f"   🔄 Previous Cycle: {current_cycle.id} (complete)")
         logger.info(f"   ❄️  New Cooldown Cycle: {new_cooldown_cycle.id}")
         logger.info(f"   ⏱️  Cooldown Period: {asset_config.cooldown_period} seconds")
@@ -1271,7 +1272,7 @@ async def update_cycle_on_order_cancellation(order, event):
                 alpaca_qty = Decimal(str(alpaca_position.qty))
                 alpaca_avg_price = Decimal(str(alpaca_position.avg_entry_price))
                 
-                logger.info(f"📊 Syncing with Alpaca position after {event}: {alpaca_qty} @ ${alpaca_avg_price:.4f}")
+                logger.info(f"📊 Syncing with Alpaca position after {event}: {alpaca_qty} @ {format_price(alpaca_avg_price)}")
                 
                 updates['quantity'] = alpaca_qty
                 updates['average_purchase_price'] = alpaca_avg_price
@@ -1302,7 +1303,7 @@ async def update_cycle_on_order_cancellation(order, event):
             
             # Log partial fill details if applicable
             if order_filled_qty > 0:
-                logger.info(f"📊 Canceled order had partial fill: {order_filled_qty} @ ${order_filled_avg_price:.4f}")
+                logger.info(f"📊 Canceled order had partial fill: {order_filled_qty} @ {format_price(order_filled_avg_price)}")
             
         else:
             # For SELL order cancellations, enhanced handling with Alpaca position sync
@@ -1375,7 +1376,7 @@ async def update_cycle_on_order_cancellation(order, event):
                 
                 # Log partial fill details if applicable
                 if order_filled_qty > 0:
-                    logger.info(f"📊 Canceled SELL order had partial fill: {order_filled_qty} @ ${order_filled_avg_price:.4f}")
+                    logger.info(f"📊 Canceled SELL order had partial fill: {order_filled_qty} @ {format_price(order_filled_avg_price)}")
                     logger.info(f"📊 Remaining position: {current_quantity_on_alpaca} (was {cycle.quantity})")
                 
             elif (current_quantity_on_alpaca is not None and current_quantity_on_alpaca == Decimal('0') and order_filled_qty > 0) or \
@@ -1416,7 +1417,7 @@ async def update_cycle_on_order_cancellation(order, event):
                 if asset_config:
                     asset_update_success = update_asset_config(asset_config.id, {'last_sell_price': sell_price})
                     if asset_update_success:
-                        logger.info(f"✅ Updated {symbol} last_sell_price to ${sell_price:.4f}")
+                        logger.info(f"✅ Updated {symbol} last_sell_price to {format_price(sell_price)}")
                     else:
                         logger.error(f"❌ Failed to update last_sell_price for asset {asset_config.id}")
                 
