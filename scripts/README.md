@@ -53,7 +53,44 @@ python scripts/asset_caretaker.py --dry-run
 */30 * * * * cd /path/to/dcaTrader && python scripts/asset_caretaker.py >> logs/caretaker.log 2>&1
 ```
 
-## Other Scripts
+## App Control Scripts
+
+### app_control.py
+
+Provides elegant control over the main trading application with maintenance mode support.
+
+**Usage:**
+```bash
+# Stop the app (enables maintenance mode)
+python scripts/app_control.py stop
+
+# Start the app (disables maintenance mode)
+python scripts/app_control.py start
+
+# Restart the app (useful for applying asset changes)
+python scripts/app_control.py restart
+
+# Check current status
+python scripts/app_control.py status
+
+# Toggle maintenance mode
+python scripts/app_control.py maintenance on
+python scripts/app_control.py maintenance off
+```
+
+**Features:**
+- Graceful shutdown with SIGTERM → SIGKILL fallback
+- Maintenance mode prevents watchdog interference
+- Comprehensive status reporting
+- Safe timeout handling
+- Process validation and uptime tracking
+
+**Maintenance Mode:**
+When enabled, the watchdog will not restart the main app, allowing for manual control and maintenance operations. Perfect for:
+- Applying configuration changes
+- Adding/removing assets
+- Debugging issues
+- Manual testing
 
 ### watchdog.py
 
@@ -66,7 +103,18 @@ python scripts/watchdog.py
 
 # Run in background
 nohup python scripts/watchdog.py &
+
+# Add to crontab for automatic monitoring (every 5 minutes)
+*/5 * * * * cd /path/to/dcaTrader && python scripts/watchdog.py >> logs/watchdog.log 2>&1
 ```
+
+**Features:**
+- Detects if main_app.py is running
+- Automatically restarts if stopped (unless in maintenance mode)
+- Email notifications for failures
+- Comprehensive logging
+- Resource cleanup
+- Respects maintenance mode from app_control.py
 
 ## Workflow for Adding New Assets
 
@@ -82,9 +130,29 @@ nohup python scripts/watchdog.py &
 
 3. **Restart the main app** (to pick up new WebSocket subscriptions):
    ```bash
-   pkill -f "python.*main_app.py"
-   python src/main_app.py &
+   python scripts/app_control.py restart
    ```
+
+## Workflow for Maintenance Operations
+
+1. **Stop the app and enable maintenance mode:**
+   ```bash
+   python scripts/app_control.py stop
+   ```
+
+2. **Perform maintenance tasks** (database changes, configuration updates, etc.)
+
+3. **Start the app and disable maintenance mode:**
+   ```bash
+   python scripts/app_control.py start
+   ```
+
+**Alternative:** Use `maintenance` command for temporary maintenance without stopping the app:
+```bash
+python scripts/app_control.py maintenance on
+# Perform maintenance...
+python scripts/app_control.py maintenance off
+```
 
 ## Notes
 

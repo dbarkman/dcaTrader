@@ -281,6 +281,17 @@ def cleanup_stale_resources():
         logger.warning(f"Error during cleanup: {e}")
 
 
+def is_maintenance_mode() -> bool:
+    """
+    Check if maintenance mode is enabled.
+    
+    Returns:
+        bool: True if maintenance mode is enabled
+    """
+    maintenance_file = project_root / '.maintenance'
+    return maintenance_file.exists()
+
+
 def main():
     """
     Main watchdog logic.
@@ -290,6 +301,13 @@ def main():
     logger.info("=" * 70)
     
     try:
+        # Check if maintenance mode is enabled
+        if is_maintenance_mode():
+            logger.info("🔧 Maintenance mode is ENABLED")
+            logger.info("⏸️ Watchdog is PAUSED - will not restart main app")
+            logger.info("ℹ️ Use 'python scripts/app_control.py maintenance off' to resume")
+            return
+        
         # Check if main_app.py is running
         is_running, pid = is_main_app_running()
         
