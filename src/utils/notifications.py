@@ -185,6 +185,10 @@ def send_trading_alert(
     Returns:
         True if alert was sent successfully, False otherwise
     """
+    # Check if trading alerts are enabled
+    if not config.trading_alerts_enabled:
+        logger.debug(f"Trading alerts disabled, skipping {event_type} alert for {asset_symbol}")
+        return True  # Return True to indicate "success" (alert was intentionally skipped)
     # Create formatted subject and body
     subject = f"{event_type} - {asset_symbol}"
     
@@ -346,6 +350,10 @@ If you received this email, your email configuration is working correctly.
 # Convenience functions for common alert types
 def alert_order_placed(asset_symbol: str, order_type: str, order_id: str, quantity: float, price: float) -> bool:
     """Send alert for order placement."""
+    if not config.trading_alerts_enabled:
+        logger.debug(f"Trading alerts disabled, skipping order placed alert for {asset_symbol}")
+        return True
+    
     return send_trading_alert(
         asset_symbol,
         f"{order_type.upper()} ORDER PLACED",
@@ -360,6 +368,10 @@ def alert_order_placed(asset_symbol: str, order_type: str, order_id: str, quanti
 
 def alert_order_filled(asset_symbol: str, order_type: str, order_id: str, fill_price: float, quantity: float) -> bool:
     """Send alert for order fill."""
+    if not config.trading_alerts_enabled:
+        logger.debug(f"Trading alerts disabled, skipping order filled alert for {asset_symbol}")
+        return True
+    
     return send_trading_alert(
         asset_symbol,
         f"{order_type.upper()} ORDER FILLED",
@@ -374,6 +386,10 @@ def alert_order_filled(asset_symbol: str, order_type: str, order_id: str, fill_p
 
 def alert_cycle_completed(asset_symbol: str, profit: float, profit_percent: float) -> bool:
     """Send alert for completed trading cycle."""
+    if not config.trading_alerts_enabled:
+        logger.debug(f"Trading alerts disabled, skipping cycle completed alert for {asset_symbol}")
+        return True
+    
     return send_trading_alert(
         asset_symbol,
         "CYCLE COMPLETED",

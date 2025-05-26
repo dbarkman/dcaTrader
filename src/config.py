@@ -161,6 +161,11 @@ class Config:
             self.alert_email_to
         ])
     
+    @property
+    def trading_alerts_enabled(self) -> bool:
+        """True if trading alerts should be sent (separate from system alerts)."""
+        return self._get_bool_env('TRADING_ALERTS_ENABLED', True)
+    
     # =============================================================================
     # LOGGING CONFIGURATION
     # =============================================================================
