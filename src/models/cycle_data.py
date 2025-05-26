@@ -35,6 +35,7 @@ class DcaCycle:
     completed_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
+    sell_price: Optional[Decimal] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> 'DcaCycle':
@@ -59,7 +60,8 @@ class DcaCycle:
             last_order_fill_price=Decimal(str(data['last_order_fill_price'])) if data['last_order_fill_price'] is not None else None,
             completed_at=data['completed_at'],
             created_at=data['created_at'],
-            updated_at=data['updated_at']
+            updated_at=data['updated_at'],
+            sell_price=Decimal(str(data['sell_price'])) if data.get('sell_price') is not None else None
         )
 
 
@@ -80,7 +82,7 @@ def get_latest_cycle(asset_id: int) -> Optional[DcaCycle]:
         query = """
         SELECT id, asset_id, status, quantity, average_purchase_price,
                safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-               completed_at, created_at, updated_at
+               completed_at, created_at, updated_at, sell_price
         FROM dca_cycles 
         WHERE asset_id = %s
         ORDER BY id DESC
@@ -164,7 +166,7 @@ def create_cycle(
             fetch_query = """
             SELECT id, asset_id, status, quantity, average_purchase_price,
                    safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-                   completed_at, created_at, updated_at
+                   completed_at, created_at, updated_at, sell_price
             FROM dca_cycles 
             WHERE id = %s
             """
@@ -256,7 +258,7 @@ def get_cycle_by_id(cycle_id: int) -> Optional[DcaCycle]:
         query = """
         SELECT id, asset_id, status, quantity, average_purchase_price,
                safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-               completed_at, created_at, updated_at
+               completed_at, created_at, updated_at, sell_price
         FROM dca_cycles 
         WHERE id = %s
         """

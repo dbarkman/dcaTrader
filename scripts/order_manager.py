@@ -119,7 +119,7 @@ def get_active_cycle_order_ids() -> Set[str]:
 def identify_stale_buy_orders(open_orders: List, active_order_ids: Set[str], current_time: datetime) -> List:
     """
     Identify stale BUY limit orders that should be canceled.
-    Only identifies BUY orders that are old AND not actively tracked.
+    Only identifies untracked BUY orders that are old - preserves tracked orders.
     
     Args:
         open_orders: List of open Alpaca orders
@@ -127,7 +127,7 @@ def identify_stale_buy_orders(open_orders: List, active_order_ids: Set[str], cur
         current_time: Current UTC time
     
     Returns:
-        List: Orders that are stale BUY orders
+        List: Orders that are stale untracked BUY orders
     """
     stale_orders = []
     
@@ -139,16 +139,26 @@ def identify_stale_buy_orders(open_orders: List, active_order_ids: Set[str], cur
             # Calculate order age
             order_age = calculate_order_age(order.created_at, current_time)
             
-            # Only consider it stale if it's old AND not actively tracked
-            if (order_age > STALE_ORDER_THRESHOLD and 
-                str(order.id) not in active_order_ids):
+            # Only consider untracked orders as stale (preserve tracked orders)
+            if order_age > STALE_ORDER_THRESHOLD:
+                order_id_str = str(order.id)
+                is_tracked = order_id_str in active_order_ids
                 
-                stale_orders.append(order)
-                logger.info(f"Identified stale BUY order: {order.id} "
-                           f"(age: {order_age.total_seconds():.0f}s, "
-                           f"symbol: {order.symbol}, "
-                           f"qty: {order.qty}, "
-                           f"price: ${order.limit_price})")
+                if is_tracked:
+                    logger.info(f"Preserving tracked BUY order: {order.id} "
+                               f"(age: {order_age.total_seconds():.0f}s, "
+                               f"symbol: {order.symbol}, "
+                               f"qty: {order.qty}, "
+                               f"price: ${order.limit_price}, "
+                               f"status: tracked)")
+                else:
+                    stale_orders.append(order)
+                    logger.info(f"Identified stale BUY order: {order.id} "
+                               f"(age: {order_age.total_seconds():.0f}s, "
+                               f"symbol: {order.symbol}, "
+                               f"qty: {order.qty}, "
+                               f"price: ${order.limit_price}, "
+                               f"status: untracked)")
     
     return stale_orders
 
@@ -202,7 +212,7 @@ def identify_stuck_sell_orders(current_time: datetime) -> List[DcaCycle]:
         query = """
         SELECT id, asset_id, status, quantity, average_purchase_price, 
                safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-               completed_at, created_at, updated_at
+               completed_at, created_at, updated_at, sell_price
         FROM dca_cycles 
         WHERE status = 'selling' 
         AND latest_order_id IS NOT NULL 
@@ -238,14 +248,15 @@ def identify_stuck_sell_orders(current_time: datetime) -> List[DcaCycle]:
         return []
 
 
-def cancel_orders(client, orders_to_cancel: List, order_type: str) -> int:
+def cancel_orders(client, orders_to_cancel: List, order_type: str, active_order_ids: Set[str] = None) -> int:
     """
-    Cancel a list of orders.
+    Cancel a list of orders and update database for tracked orders.
     
     Args:
         client: Alpaca trading client
         orders_to_cancel: List of orders to cancel
         order_type: Description of order type for logging
+        active_order_ids: Set of order IDs tracked by active cycles (optional)
     
     Returns:
         int: Number of orders successfully canceled
@@ -254,16 +265,47 @@ def cancel_orders(client, orders_to_cancel: List, order_type: str) -> int:
     
     for order in orders_to_cancel:
         try:
+            order_id_str = str(order.id)
+            is_tracked = active_order_ids and order_id_str in active_order_ids
+            
             if DRY_RUN:
                 logger.info(f"[DRY RUN] Would cancel {order_type} order: {order.id} "
                            f"({order.symbol}, {order.side.value}, age: "
                            f"{calculate_order_age(order.created_at, get_current_utc_time()).total_seconds():.0f}s)")
+                if is_tracked:
+                    logger.info(f"[DRY RUN] Would update database to clear tracking for order {order.id}")
                 canceled_count += 1
             else:
                 success = cancel_order(client, order.id)
                 if success:
                     logger.info(f"✅ Successfully canceled {order_type} order: {order.id} "
                                f"({order.symbol}, {order.side.value})")
+                    
+                    # If this was a tracked order, update the database
+                    if is_tracked:
+                        logger.info(f"🔄 Updating database to clear tracking for canceled order {order.id}")
+                        try:
+                            # Import here to avoid circular imports
+                            from utils.db_utils import execute_query
+                            
+                            # Update cycles that were tracking this order
+                            update_query = """
+                            UPDATE dca_cycles 
+                            SET status = 'watching', 
+                                latest_order_id = NULL, 
+                                latest_order_created_at = NULL
+                            WHERE latest_order_id = %s
+                            """
+                            
+                            result = execute_query(update_query, (order_id_str,))
+                            if result:
+                                logger.info(f"✅ Updated database: cleared tracking for order {order.id}")
+                            else:
+                                logger.warning(f"⚠️ Failed to update database for order {order.id}")
+                                
+                        except Exception as db_error:
+                            logger.error(f"❌ Database update error for order {order.id}: {db_error}")
+                    
                     canceled_count += 1
                 else:
                     logger.warning(f"⚠️ Failed to cancel {order_type} order: {order.id} "
@@ -398,13 +440,13 @@ def main():
             orphaned_orders = identify_orphaned_orders(open_orders, active_order_ids, current_time)
             logger.info(f"Found {len(orphaned_orders)} orphaned orders")
             
-            # Step 6: Cancel stale BUY orders (these are BUY limit orders not tracked in DB)
+            # Step 6: Cancel stale BUY orders (untracked only - preserve tracked orders)
             if stale_buy_orders:
-                logger.info(f"🧹 Canceling {len(stale_buy_orders)} stale BUY orders...")
-                stale_canceled = cancel_orders(client, stale_buy_orders, "stale BUY")
+                logger.info(f"🧹 Canceling {len(stale_buy_orders)} stale untracked BUY orders...")
+                stale_canceled = cancel_orders(client, stale_buy_orders, "stale BUY", active_order_ids)
                 logger.info(f"✅ Canceled {stale_canceled}/{len(stale_buy_orders)} stale BUY orders")
             else:
-                logger.info("✅ No stale BUY orders to cancel")
+                logger.info("✅ No stale untracked BUY orders to cancel")
             
             # Step 7: Cancel orphaned orders (non-BUY orders not tracked in DB)
             # Filter out BUY orders since they were already handled above

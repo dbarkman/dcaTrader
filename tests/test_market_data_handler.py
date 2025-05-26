@@ -127,7 +127,7 @@ class TestBaseOrderLogic:
         existing_position = Mock()
         existing_position.symbol = 'BTCUSD'
         existing_position.qty = '0.1'
-        existing_position.avg_cost = '48000.0'
+        existing_position.avg_entry_price = '48000.0'
         mock_get_positions.return_value = [existing_position]
         
         check_and_place_base_order(self.mock_quote)

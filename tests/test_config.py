@@ -169,7 +169,7 @@ class TestConfig(unittest.TestCase):
     def test_email_alerts_enabled(self, mock_logger, mock_load_dotenv):
         """Test email alerts enabled detection."""
         # Test with all email config present
-        with patch.dict(os.environ, self.test_env):
+        with patch.dict(os.environ, self.test_env, clear=True):
             config = Config()
             self.assertTrue(config.email_alerts_enabled)
         
@@ -177,7 +177,7 @@ class TestConfig(unittest.TestCase):
         env_without_email = {k: v for k, v in self.test_env.items() 
                             if not k.startswith('SMTP_') and not k.startswith('ALERT_EMAIL_')}
         
-        with patch.dict(os.environ, env_without_email):
+        with patch.dict(os.environ, env_without_email, clear=True):
             config = Config()
             self.assertFalse(config.email_alerts_enabled)
     
@@ -262,7 +262,7 @@ class TestConfig(unittest.TestCase):
         incomplete_env = {k: v for k, v in self.test_env.items() 
                          if k != 'SMTP_PASSWORD'}  # Missing password
         
-        with patch.dict(os.environ, incomplete_env):
+        with patch.dict(os.environ, incomplete_env, clear=True):
             email_config = get_email_config()
             self.assertIsNone(email_config)
 

@@ -135,7 +135,7 @@ class TestOrderManager(unittest.TestCase):
             self.assertGreater(age, STALE_ORDER_THRESHOLD, "All stale orders should be older than threshold")
     
     def test_identify_stale_buy_orders_with_tracked_orders(self):
-        """Test that actively tracked orders are not identified as stale."""
+        """Test that actively tracked orders are preserved and NOT identified as stale."""
         # Create a stale BUY order that is tracked in database
         tracked_order = self.create_mock_order(
             order_id="tracked_stale_buy",
@@ -151,8 +151,25 @@ class TestOrderManager(unittest.TestCase):
         
         stale_orders = identify_stale_buy_orders(orders, active_order_ids, self.current_time)
         
-        # Should not identify tracked orders as stale
-        self.assertEqual(len(stale_orders), 0, "Should not identify tracked orders as stale")
+        # Should NOT identify tracked orders as stale - they should be preserved
+        self.assertEqual(len(stale_orders), 0, "Should preserve tracked orders even when old")
+        
+        # Test with mixed tracked and untracked orders
+        untracked_order = self.create_mock_order(
+            order_id="untracked_stale_buy",
+            symbol="ETH/USD",
+            side="buy",
+            order_type="limit",
+            created_at=self.old_time,
+            limit_price=3000.0
+        )
+        
+        mixed_orders = [tracked_order, untracked_order]
+        stale_orders_mixed = identify_stale_buy_orders(mixed_orders, active_order_ids, self.current_time)
+        
+        # Should only identify untracked order as stale
+        self.assertEqual(len(stale_orders_mixed), 1, "Should identify only untracked stale orders")
+        self.assertEqual(stale_orders_mixed[0].id, "untracked_stale_buy", "Should identify the untracked order")
     
     def test_identify_orphaned_orders(self):
         """

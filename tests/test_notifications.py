@@ -166,9 +166,11 @@ class TestEmailAlerts(unittest.TestCase):
         # Should not record email sent when bypassing rate limit
         mock_rate_limiter.record_email_sent.assert_not_called()
     
+    @patch('utils.notifications.config')
     @patch('utils.notifications.send_email_alert')
-    def test_send_trading_alert(self, mock_send_email):
+    def test_send_trading_alert(self, mock_send_email, mock_config):
         """Test trading alert formatting."""
+        mock_config.trading_alerts_enabled = True
         mock_send_email.return_value = True
         
         result = send_trading_alert(
@@ -258,9 +260,11 @@ class TestEmailAlerts(unittest.TestCase):
         
         self.assertFalse(result)
     
+    @patch('utils.notifications.config')
     @patch('utils.notifications.send_trading_alert')
-    def test_convenience_alert_functions(self, mock_send_trading):
+    def test_convenience_alert_functions(self, mock_send_trading, mock_config):
         """Test convenience alert functions."""
+        mock_config.trading_alerts_enabled = True
         mock_send_trading.return_value = True
         
         # Test order placed alert

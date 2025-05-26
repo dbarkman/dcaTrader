@@ -201,21 +201,29 @@ def check_and_place_base_order(quote):
             logger.error(f"Could not initialize Alpaca client for {symbol}")
             return
         
-        # Step 6: Check for existing positions
+        # Step 6: Check for existing positions (ignore tiny positions below minimum order size)
         positions = get_positions(client)
         existing_position = None
+        min_order_qty = 0.000000002  # Alpaca's minimum order quantity for crypto
         
         # Convert symbol format for Alpaca comparison (UNI/USD -> UNIUSD)
         alpaca_symbol = symbol.replace('/', '')
         
         for position in positions:
             if position.symbol == alpaca_symbol and float(position.qty) != 0:
+                position_qty = float(position.qty)
+                
+                # Ignore tiny positions that are below minimum order size
+                if position_qty < min_order_qty:
+                    logger.debug(f"Ignoring tiny position for {symbol}: {position_qty} < {min_order_qty}")
+                    continue
+                    
                 existing_position = position
                 break
         
         if existing_position:
             logger.warning(f"Base order for {symbol} skipped, existing position found on Alpaca. "
-                          f"Position: {existing_position.qty} @ ${existing_position.avg_cost}")
+                          f"Position: {existing_position.qty} @ ${existing_position.avg_entry_price}")
             # TODO: Send notification in future phases
             return
         
@@ -635,6 +643,15 @@ def check_and_place_take_profit_order(quote):
             logger.error(f"Invalid sell quantity for take-profit {symbol}: {sell_quantity}")
             return
         
+        # Check if quantity meets Alpaca's minimum order requirements
+        min_order_qty = 0.000000002  # Alpaca's minimum order quantity for crypto
+        if sell_quantity < min_order_qty:
+            logger.warning(f"⚠️ Take-profit skipped for {symbol}: quantity {sell_quantity} < minimum {min_order_qty}")
+            
+            # Auto-reset tiny positions to unblock the cycle
+            handle_tiny_position(latest_cycle, alpaca_position, symbol, bid_price_decimal)
+            return
+        
         # Log quantity comparison for debugging
         db_quantity = float(latest_cycle.quantity)
         if abs(sell_quantity - db_quantity) > 0.000001:  # Allow for small floating point differences
@@ -933,6 +950,12 @@ async def update_cycle_on_buy_fill(order, trade_update):
             
             logger.info(f"📊 Syncing with Alpaca position: {alpaca_qty} @ {format_price(alpaca_avg_price)}")
             
+            # Check if the position quantity is too small for future take-profit orders
+            min_order_qty = Decimal('0.000000002')  # Alpaca's minimum order quantity
+            if alpaca_qty < min_order_qty:
+                logger.warning(f"⚠️ Position quantity {alpaca_qty} is below minimum order size {min_order_qty}")
+                logger.warning(f"   This position may not be sellable via take-profit orders")
+            
             updates = {
                 'quantity': alpaca_qty,
                 'average_purchase_price': alpaca_avg_price,
@@ -1030,6 +1053,64 @@ def get_alpaca_position_by_symbol(client: TradingClient, symbol: str) -> Optiona
     except Exception as e:
         logger.error(f"Error fetching Alpaca position for {symbol}: {e}")
         return None
+
+
+def handle_tiny_position(cycle, alpaca_position, symbol: str, current_price: Decimal):
+    """
+    Reset cycles with positions too small for take-profit orders.
+    
+    This function handles the situation where a cycle has a position that's below
+    Alpaca's minimum order size, which blocks the cycle from being able to place
+    take-profit orders and prevents new base orders from being placed.
+    
+    Args:
+        cycle: The DcaCycle object with the tiny position
+        alpaca_position: The Alpaca position object
+        symbol: Asset symbol (e.g., 'PEPE/USD')
+        current_price: Current market price as Decimal
+    """
+    try:
+        min_order_qty = Decimal('0.000000002')  # Alpaca's minimum order quantity
+        position_qty = Decimal(str(alpaca_position.qty))
+        
+        # Calculate market value for logging
+        market_value = position_qty * current_price
+        
+        logger.info(f"🔄 Auto-resetting tiny position for {symbol}:")
+        logger.info(f"   Cycle ID: {cycle.id}")
+        logger.info(f"   Position Quantity: {position_qty}")
+        logger.info(f"   Minimum Required: {min_order_qty}")
+        logger.info(f"   Market Value: ${market_value:.8f}")
+        logger.info(f"   Action: Reset cycle to zero quantity, continue normal lifecycle")
+        
+        # Reset the cycle to zero state - this unblocks the cycle for new base orders
+        updates = {
+            'quantity': Decimal('0'),
+            'average_purchase_price': Decimal('0'),
+            'safety_orders': 0,
+            'last_order_fill_price': None
+        }
+        
+        success = update_cycle(cycle.id, updates)
+        
+        if success:
+            logger.info(f"✅ Cycle {cycle.id} reset to zero - ready for new base orders")
+            logger.info(f"   Status: watching (unchanged)")
+            logger.info(f"   Quantity: 0 (was {cycle.quantity})")
+            logger.info(f"   Safety Orders: 0 (was {cycle.safety_orders})")
+            logger.info(f"   🚀 {symbol} cycle unblocked - can now place base orders")
+            
+            # Note: We intentionally leave the tiny Alpaca position as-is
+            # It's worth essentially $0 and will be ignored going forward
+            logger.info(f"   📝 Note: Tiny Alpaca position (${market_value:.8f}) left as-is")
+            
+        else:
+            logger.error(f"❌ Failed to reset cycle {cycle.id} for {symbol}")
+            logger.error(f"   Cycle remains blocked - manual intervention may be required")
+            
+    except Exception as e:
+        logger.error(f"❌ Error handling tiny position for {symbol}: {e}")
+        logger.exception("Full traceback:")
 
 
 async def update_cycle_on_sell_fill(order, trade_update):

@@ -122,6 +122,7 @@ CREATE TABLE dca_cycles (
     latest_order_created_at TIMESTAMP NULL DEFAULT NULL,
     last_order_fill_price DECIMAL(20, 10) NULL,
     completed_at TIMESTAMP NULL,
+    sell_price DECIMAL(20, 10) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (asset_id) REFERENCES dca_assets(id) ON DELETE CASCADE
@@ -136,6 +137,7 @@ Comments for dca_cycles table:
 - `latest_order_id`: Alpaca order ID of the most recent order for this cycle
 - `last_order_fill_price`: Fill price of the most recent BUY order in this cycle
 - `completed_at`: Timestamp when the cycle reached a terminal status ('complete', 'error')
+- `sell_price`: Final sell price when cycle is completed (for P/L calculation)
 
 5. Configure Environment Variables:
    Create a .env file in the project root directory with your Alpaca API keys and database credentials:
