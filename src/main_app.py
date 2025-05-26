@@ -116,8 +116,7 @@ async def on_crypto_quote(quote):
     Args:
         quote: Quote object from Alpaca containing bid/ask data
     """
-    logger.info(f"Quote: {quote.symbol} - Bid: ${quote.bid_price} @ {quote.bid_size}, "
-               f"Ask: ${quote.ask_price} @ {quote.ask_size}")
+    logger.info(f"Quote: {quote.symbol} - Bid: ${quote.bid_price} @ {quote.bid_size}, Ask: ${quote.ask_price} @ {quote.ask_size}")
     
     # Phase 4: Check if we should place a base order for this asset
     try:
@@ -1204,7 +1203,8 @@ async def update_cycle_on_sell_fill(order, trade_update):
             'status': 'complete',
             'completed_at': datetime.now(timezone.utc),
             'latest_order_id': None,
-            'latest_order_created_at': None  # Clear the order timestamp
+            'latest_order_created_at': None,  # Clear the order timestamp
+            'sell_price': avg_fill_price  # Store the sell price for P/L calculations
         }
         
         update_success = update_cycle(current_cycle.id, updates_current)
@@ -1481,7 +1481,7 @@ async def update_cycle_on_order_cancellation(order, event):
                 updates['completed_at'] = datetime.now(timezone.utc)
                 updates['quantity'] = Decimal('0')
                 
-                # Determine best price for last_sell_price
+                # Determine best price for last_sell_price and cycle sell_price
                 sell_price = None
                 if order_filled_avg_price:
                     sell_price = order_filled_avg_price
@@ -1492,6 +1492,9 @@ async def update_cycle_on_order_cancellation(order, event):
                         sell_price = cycle.average_purchase_price
                 else:
                     sell_price = cycle.average_purchase_price
+                
+                # Store the sell price in the cycle for P/L calculations
+                updates['sell_price'] = sell_price
                 
                 # Update asset last_sell_price
                 asset_config = get_asset_config(symbol)

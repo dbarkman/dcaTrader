@@ -25,7 +25,11 @@ def analyze_completed_cycles():
     SELECT 
         COUNT(*) as total_cycles,
         SUM(c.quantity * c.average_purchase_price) as total_invested,
-        AVG(c.quantity * c.average_purchase_price) as avg_invested_per_cycle
+        AVG(c.quantity * c.average_purchase_price) as avg_invested_per_cycle,
+        SUM(CASE WHEN c.sell_price IS NOT NULL 
+            THEN c.quantity * (c.sell_price - c.average_purchase_price) 
+            ELSE 0 END) as total_realized_pl,
+        COUNT(CASE WHEN c.sell_price IS NOT NULL THEN 1 END) as cycles_with_sell_price
     FROM dca_cycles c
     JOIN dca_assets a ON c.asset_id = a.id
     WHERE c.status = 'complete'
@@ -37,14 +41,20 @@ def analyze_completed_cycles():
         total_cycles = completed_results['total_cycles']
         total_invested = Decimal(str(completed_results['total_invested']))
         avg_per_cycle = Decimal(str(completed_results['avg_invested_per_cycle']))
+        total_realized_pl = Decimal(str(completed_results['total_realized_pl'] or '0'))
+        cycles_with_sell_price = completed_results['cycles_with_sell_price']
         
         print(f'📋 Total Completed Cycles: {total_cycles}')
         print(f'💰 Total Amount Invested: ${total_invested:.2f}')
         print(f'📊 Average per Cycle: ${avg_per_cycle:.2f}')
-        print(f'⚠️  Note: Realized P/L calculation requires sell_price data')
+        print(f'💵 Total Realized P/L: ${total_realized_pl:.2f}')
+        print(f'📈 Cycles with sell_price data: {cycles_with_sell_price}/{total_cycles}')
         
-        # For now, return 0 for P/L since we can't calculate it yet
-        return Decimal('0'), total_cycles
+        if cycles_with_sell_price < total_cycles:
+            missing_cycles = total_cycles - cycles_with_sell_price
+            print(f'⚠️  {missing_cycles} cycles missing sell_price data (older cycles)')
+        
+        return total_realized_pl, total_cycles
     else:
         print('📋 No completed cycles found.')
         return Decimal('0'), 0
@@ -90,11 +100,17 @@ def analyze_active_cycles():
             status = row['status']
             
             if quantity > 0 and avg_price > 0:
-                # Get current price
+                # Get current bid price (what we could actually sell at)
                 try:
-                    current_price = get_latest_crypto_price(client, symbol)
-                    if current_price:
-                        current_price = Decimal(str(current_price))
+                    from alpaca.data.historical import CryptoHistoricalDataClient
+                    from alpaca.data.requests import CryptoLatestQuoteRequest
+                    
+                    data_client = CryptoHistoricalDataClient()
+                    request = CryptoLatestQuoteRequest(symbol_or_symbols=[symbol])
+                    quotes = data_client.get_crypto_latest_quote(request)
+                    
+                    if symbol in quotes:
+                        current_price = Decimal(str(quotes[symbol].bid_price))  # Use bid price for realistic P/L
                         
                         # Calculate unrealized P/L
                         cost_basis = quantity * avg_price
