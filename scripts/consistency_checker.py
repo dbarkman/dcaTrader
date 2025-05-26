@@ -294,8 +294,11 @@ def get_alpaca_position_by_symbol(client: TradingClient, symbol: str) -> Optiona
         from utils.alpaca_client_rest import get_positions
         
         positions = get_positions(client)
+        # Convert symbol format for Alpaca comparison (UNI/USD -> UNIUSD)
+        alpaca_symbol = symbol.replace('/', '')
+        
         for position in positions:
-            if position.symbol == symbol and float(position.qty) != 0:
+            if position.symbol == alpaca_symbol and float(position.qty) != 0:
                 logger.debug(f"Found Alpaca position for {symbol}: {position.qty} @ ${position.avg_entry_price}")
                 return position
         
@@ -313,13 +316,15 @@ def has_alpaca_position(client: TradingClient, symbol: str) -> bool:
     
     Args:
         client: Alpaca trading client
-        symbol: Asset symbol to check
+        symbol: Asset symbol to check (e.g., 'UNI/USD')
     
     Returns:
         bool: True if position exists with meaningful quantity, False otherwise
     """
     try:
-        position = client.get_open_position(symbol)
+        # Convert symbol format for Alpaca API (UNI/USD -> UNIUSD)
+        alpaca_symbol = symbol.replace('/', '')
+        position = client.get_open_position(alpaca_symbol)
         
         # Check if position has meaningful quantity
         if position and position.qty and abs(float(position.qty)) > 0.0001:

@@ -311,13 +311,13 @@ class TestConsistencyChecker(unittest.TestCase):
     def test_has_alpaca_position_position_exists(self):
         """Test position check when position exists."""
         mock_client = Mock()
-        mock_position = self.create_mock_position("BTC/USD", "0.01")
+        mock_position = self.create_mock_position("BTCUSD", "0.01")
         mock_client.get_open_position.return_value = mock_position
         
         result = has_alpaca_position(mock_client, "BTC/USD")
         
         self.assertTrue(result, "Should return True when position exists")
-        mock_client.get_open_position.assert_called_once_with("BTC/USD")
+        mock_client.get_open_position.assert_called_once_with("BTCUSD")
     
     def test_has_alpaca_position_no_position(self):
         """Test position check when no position exists."""
@@ -501,7 +501,7 @@ class TestConsistencyChecker(unittest.TestCase):
         mock_position1.avg_entry_price = '3000.0'
         
         mock_position2 = Mock()
-        mock_position2.symbol = 'BTC/USD'
+        mock_position2.symbol = 'BTCUSD'
         mock_position2.qty = '0.01'
         mock_position2.avg_entry_price = '50000.0'
         
@@ -510,7 +510,7 @@ class TestConsistencyChecker(unittest.TestCase):
         result = get_alpaca_position_by_symbol(mock_client, 'BTC/USD')
         
         self.assertIsNotNone(result, "Should return position when found")
-        self.assertEqual(result.symbol, 'BTC/USD', "Should return correct position")
+        self.assertEqual(result.symbol, 'BTCUSD', "Should return correct position")
         self.assertEqual(result.qty, '0.01', "Should have correct quantity")
         mock_get_positions.assert_called_once_with(mock_client)
 

@@ -37,10 +37,13 @@ class TestBuyFillProcessing:
     
     @pytest.mark.unit
     @pytest.mark.asyncio
+    @patch('main_app.get_alpaca_position_by_symbol')
+    @patch('main_app.get_trading_client')
     @patch('main_app.execute_query')
     @patch('main_app.update_cycle')
     @patch('main_app.logger')
-    async def test_buy_fill_updates_cycle_base_order(self, mock_logger, mock_update_cycle, mock_execute_query):
+    async def test_buy_fill_updates_cycle_base_order(self, mock_logger, mock_update_cycle, mock_execute_query, 
+                                                    mock_get_client, mock_get_position):
         """Test that a base order fill correctly updates the cycle"""
         
         # Mock cycle lookup by latest_order_id
@@ -68,6 +71,16 @@ class TestBuyFillProcessing:
         # Configure execute_query to return cycle then asset data
         mock_execute_query.side_effect = [mock_cycle_data, mock_asset_data]
         mock_update_cycle.return_value = True
+        
+        # Mock Alpaca client and position
+        mock_client = Mock()
+        mock_get_client.return_value = mock_client
+        
+        # Mock Alpaca position that matches our expected values
+        mock_position = Mock()
+        mock_position.qty = '0.001'  # Match the filled_qty
+        mock_position.avg_entry_price = '50000.00'  # Match the filled_avg_price
+        mock_get_position.return_value = mock_position
         
         # Execute the function
         await update_cycle_on_buy_fill(self.mock_order, self.mock_trade_update)

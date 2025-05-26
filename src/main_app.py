@@ -204,8 +204,11 @@ def check_and_place_base_order(quote):
         positions = get_positions(client)
         existing_position = None
         
+        # Convert symbol format for Alpaca comparison (UNI/USD -> UNIUSD)
+        alpaca_symbol = symbol.replace('/', '')
+        
         for position in positions:
-            if position.symbol == symbol and float(position.qty) != 0:
+            if position.symbol == alpaca_symbol and float(position.qty) != 0:
                 existing_position = position
                 break
         
@@ -617,13 +620,25 @@ def check_and_place_take_profit_order(quote):
             logger.error(f"Could not initialize Alpaca client for take-profit {symbol}")
             return
         
-        # Step 11: Use the full cycle quantity for take-profit (sell entire position)
-        sell_quantity = float(latest_cycle.quantity)
+        # Step 11: Get actual Alpaca position quantity for accurate sell order
+        alpaca_position = get_alpaca_position_by_symbol(client, symbol)
+        if not alpaca_position:
+            logger.error(f"No Alpaca position found for take-profit {symbol} - cannot place sell order")
+            return
+        
+        # Use actual Alpaca position quantity to avoid quantity mismatches
+        sell_quantity = float(alpaca_position.qty)
         
         # Validate calculated values before placing order
         if not sell_quantity or sell_quantity <= 0:
             logger.error(f"Invalid sell quantity for take-profit {symbol}: {sell_quantity}")
             return
+        
+        # Log quantity comparison for debugging
+        db_quantity = float(latest_cycle.quantity)
+        if abs(sell_quantity - db_quantity) > 0.000001:  # Allow for small floating point differences
+            logger.warning(f"Quantity mismatch for {symbol}: DB={db_quantity:.8f}, Alpaca={sell_quantity:.8f}")
+            logger.info(f"Using Alpaca position quantity for accuracy: {sell_quantity:.8f}")
         
         # Enhanced logging for take-profit order
         price_gain = bid_price_decimal - latest_cycle.average_purchase_price
@@ -1000,8 +1015,11 @@ def get_alpaca_position_by_symbol(client: TradingClient, symbol: str) -> Optiona
     """
     try:
         positions = get_positions(client)
+        # Convert symbol format for Alpaca comparison (UNI/USD -> UNIUSD)
+        alpaca_symbol = symbol.replace('/', '')
+        
         for position in positions:
-            if position.symbol == symbol and float(position.qty) != 0:
+            if position.symbol == alpaca_symbol and float(position.qty) != 0:
                 logger.debug(f"Found Alpaca position for {symbol}: {position.qty} @ ${position.avg_entry_price}")
                 return position
         

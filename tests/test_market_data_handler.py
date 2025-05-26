@@ -40,6 +40,7 @@ class TestBaseOrderLogic:
         self.mock_cycle.quantity = Decimal('0')
     
     @pytest.mark.unit
+    @patch('main_app.recent_orders', {})
     @patch('main_app.get_asset_config')
     def test_base_order_skipped_if_asset_not_configured(self, mock_get_asset):
         """Test that base order is skipped if asset is not configured"""
@@ -65,6 +66,7 @@ class TestBaseOrderLogic:
         mock_get_cycle.assert_not_called()
     
     @pytest.mark.unit
+    @patch('main_app.recent_orders', {})
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_asset_config')
     def test_base_order_skipped_if_no_cycle(self, mock_get_asset, mock_get_cycle):
@@ -121,9 +123,9 @@ class TestBaseOrderLogic:
         mock_client = Mock()
         mock_get_client.return_value = mock_client
         
-        # Mock existing position
+        # Mock existing position (Alpaca format without slash)
         existing_position = Mock()
-        existing_position.symbol = 'BTC/USD'
+        existing_position.symbol = 'BTCUSD'
         existing_position.qty = '0.1'
         existing_position.avg_cost = '48000.0'
         mock_get_positions.return_value = [existing_position]
@@ -139,6 +141,7 @@ class TestBaseOrderLogic:
     @patch('main_app.get_trading_client')
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_asset_config')
+    @patch('main_app.recent_orders', {})  # Clear the global recent_orders dict
     def test_base_order_conditions_met(self, mock_get_asset, mock_get_cycle, 
                                        mock_get_client, mock_get_positions, 
                                        mock_place_order):

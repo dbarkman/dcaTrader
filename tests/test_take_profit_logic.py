@@ -50,10 +50,11 @@ class TestTakeProfitConditions:
     @patch('main_app.get_asset_config')
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_trading_client')
+    @patch('main_app.get_alpaca_position_by_symbol')
     @patch('main_app.place_market_sell_order')
     @patch('main_app.update_cycle')
     def test_take_profit_updates_database_on_order_placement(self, mock_update_cycle, mock_place_order, 
-                                                           mock_get_client, mock_get_cycle, mock_get_asset):
+                                                           mock_get_position, mock_get_client, mock_get_cycle, mock_get_asset):
         """Test that database is updated when take-profit order is placed"""
         
         # Setup: All conditions met for take-profit
@@ -61,6 +62,11 @@ class TestTakeProfitConditions:
         mock_get_cycle.return_value = self.mock_cycle
         mock_client = Mock()
         mock_get_client.return_value = mock_client
+        
+        # Mock Alpaca position
+        mock_position = Mock()
+        mock_position.qty = '0.5'
+        mock_get_position.return_value = mock_position
         
         mock_order = Mock()
         mock_order.id = 'sell_order_123'
@@ -94,9 +100,10 @@ class TestTakeProfitConditions:
     @patch('main_app.get_asset_config')
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_trading_client')
+    @patch('main_app.get_alpaca_position_by_symbol')
     @patch('main_app.place_market_sell_order')
     @patch('main_app.update_cycle')
-    def test_take_profit_conditions_met(self, mock_update_cycle, mock_place_order, mock_get_client, 
+    def test_take_profit_conditions_met(self, mock_update_cycle, mock_place_order, mock_get_position, mock_get_client, 
                                        mock_get_cycle, mock_get_asset):
         """Test that take-profit order is placed when all conditions are met"""
         
@@ -108,6 +115,11 @@ class TestTakeProfitConditions:
         mock_get_cycle.return_value = self.mock_cycle
         mock_client = Mock()
         mock_get_client.return_value = mock_client
+        
+        # Mock Alpaca position
+        mock_position = Mock()
+        mock_position.qty = '0.5'
+        mock_get_position.return_value = mock_position
         
         mock_order = Mock()
         mock_order.id = 'order_123'
@@ -260,9 +272,10 @@ class TestTakeProfitCalculations:
     @patch('main_app.get_asset_config')
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_trading_client')
+    @patch('main_app.get_alpaca_position_by_symbol')
     @patch('main_app.place_market_sell_order')
     @patch('main_app.update_cycle')
-    def test_take_profit_quantity_uses_full_position(self, mock_update_cycle, mock_place_order, mock_get_client,
+    def test_take_profit_quantity_uses_full_position(self, mock_update_cycle, mock_place_order, mock_get_position, mock_get_client,
                                                     mock_get_cycle, mock_get_asset):
         """Test that take-profit sells the entire position quantity"""
         
@@ -294,6 +307,11 @@ class TestTakeProfitCalculations:
         mock_get_cycle.return_value = mock_cycle
         mock_client = Mock()
         mock_get_client.return_value = mock_client
+        
+        # Mock Alpaca position with the expected quantity
+        mock_position = Mock()
+        mock_position.qty = '2.75'  # Match the expected quantity
+        mock_get_position.return_value = mock_position
         
         mock_order = Mock()
         mock_order.id = 'order_456'
@@ -417,8 +435,9 @@ class TestTakeProfitErrorHandling:
     @patch('main_app.get_asset_config')
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_trading_client')
+    @patch('main_app.get_alpaca_position_by_symbol')
     @patch('main_app.place_market_sell_order')
-    def test_take_profit_handles_order_failure(self, mock_place_order, mock_get_client,
+    def test_take_profit_handles_order_failure(self, mock_place_order, mock_get_position, mock_get_client,
                                               mock_get_cycle, mock_get_asset):
         """Test graceful handling when order placement fails"""
         
@@ -446,6 +465,11 @@ class TestTakeProfitErrorHandling:
         mock_client = Mock()
         mock_get_client.return_value = mock_client
         
+        # Mock position exists
+        mock_position = Mock()
+        mock_position.qty = '0.5'
+        mock_get_position.return_value = mock_position
+        
         mock_place_order.return_value = None  # Order placement failed
         
         # Execute - should not raise exception
@@ -459,11 +483,12 @@ class TestTakeProfitErrorHandling:
     @patch('main_app.get_asset_config')
     @patch('main_app.get_latest_cycle')
     @patch('main_app.get_trading_client')
+    @patch('main_app.get_alpaca_position_by_symbol')
     @patch('main_app.place_market_sell_order')
     @patch('main_app.update_cycle')
     @patch('main_app.logger')
     def test_take_profit_handles_database_update_failure(self, mock_logger, mock_update_cycle, mock_place_order,
-                                                        mock_get_client, mock_get_cycle, mock_get_asset):
+                                                        mock_get_position, mock_get_client, mock_get_cycle, mock_get_asset):
         """Test graceful handling when database update fails after order placement"""
         
         mock_quote = Mock()
@@ -490,6 +515,11 @@ class TestTakeProfitErrorHandling:
         mock_get_cycle.return_value = mock_cycle
         mock_client = Mock()
         mock_get_client.return_value = mock_client
+        
+        # Mock position exists
+        mock_position = Mock()
+        mock_position.qty = '0.5'
+        mock_get_position.return_value = mock_position
         
         mock_order = Mock()
         mock_order.id = 'sell_order_456'
