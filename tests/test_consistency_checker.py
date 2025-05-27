@@ -110,7 +110,9 @@ class TestConsistencyChecker(unittest.TestCase):
                 'safety_orders': 0,
                 'latest_order_id': 'order_123',
                 'latest_order_created_at': self.current_time,
-                'last_order_fill_price': None
+                'last_order_fill_price': None,
+                'highest_trailing_price': None,
+                'sell_price': None
             },
             {
                 'id': 2,
@@ -124,7 +126,9 @@ class TestConsistencyChecker(unittest.TestCase):
                 'safety_orders': 0,
                 'latest_order_id': None,
                 'latest_order_created_at': None,
-                'last_order_fill_price': None
+                'last_order_fill_price': None,
+                'highest_trailing_price': None,
+                'sell_price': None
             }
         ]
         
@@ -166,7 +170,9 @@ class TestConsistencyChecker(unittest.TestCase):
                 'safety_orders': 1,
                 'latest_order_id': None,
                 'latest_order_created_at': None,
-                'last_order_fill_price': Decimal('51000.0')
+                'last_order_fill_price': Decimal('51000.0'),
+                'highest_trailing_price': None,
+                'sell_price': None
             }
         ]
         
@@ -457,7 +463,9 @@ class TestConsistencyChecker(unittest.TestCase):
                 'safety_orders': 1,
                 'latest_order_id': None,
                 'latest_order_created_at': None,
-                'last_order_fill_price': Decimal('51000.0')
+                'last_order_fill_price': Decimal('51000.0'),
+                'highest_trailing_price': None,
+                'sell_price': None
             },
             {
                 'id': 11,
@@ -471,7 +479,9 @@ class TestConsistencyChecker(unittest.TestCase):
                 'safety_orders': 0,
                 'latest_order_id': None,
                 'latest_order_created_at': None,
-                'last_order_fill_price': None
+                'last_order_fill_price': None,
+                'highest_trailing_price': None,
+                'sell_price': None
             }
         ]
         

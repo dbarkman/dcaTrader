@@ -29,7 +29,21 @@ def test_dca_cycle_from_dict(sample_cycle_data):
     assert cycle.safety_orders == 2
     assert cycle.latest_order_id == 'order123'
     assert cycle.last_order_fill_price == Decimal('49000.00')
+    assert cycle.highest_trailing_price is None
     assert cycle.completed_at is None
+    assert cycle.sell_price is None
+
+
+@pytest.mark.unit
+def test_dca_cycle_from_dict_with_trailing_status(sample_cycle_data):
+    """Test creating DcaCycle with trailing status and highest_trailing_price."""
+    data = sample_cycle_data.copy()
+    data['status'] = 'trailing'
+    data['highest_trailing_price'] = Decimal('52000.00')
+    
+    cycle = DcaCycle.from_dict(data)
+    assert cycle.status == 'trailing'
+    assert cycle.highest_trailing_price == Decimal('52000.00')
 
 
 @pytest.mark.unit
@@ -38,10 +52,28 @@ def test_dca_cycle_from_dict_null_values(sample_cycle_data):
     data = sample_cycle_data.copy()
     data['latest_order_id'] = None
     data['last_order_fill_price'] = None
+    data['highest_trailing_price'] = None
+    data['sell_price'] = None
     
     cycle = DcaCycle.from_dict(data)
     assert cycle.latest_order_id is None
     assert cycle.last_order_fill_price is None
+    assert cycle.highest_trailing_price is None
+    assert cycle.sell_price is None
+
+
+@pytest.mark.unit
+def test_dca_cycle_from_dict_completed_with_sell_price(sample_cycle_data):
+    """Test creating DcaCycle with completed status and sell_price."""
+    data = sample_cycle_data.copy()
+    data['status'] = 'complete'
+    data['sell_price'] = Decimal('51500.00')
+    data['completed_at'] = datetime.now()
+    
+    cycle = DcaCycle.from_dict(data)
+    assert cycle.status == 'complete'
+    assert cycle.sell_price == Decimal('51500.00')
+    assert cycle.completed_at is not None
 
 
 @pytest.mark.unit
@@ -115,6 +147,7 @@ def test_create_cycle_with_defaults(mock_execute_query, sample_cycle_data):
     created_cycle_data['safety_orders'] = 0
     created_cycle_data['latest_order_id'] = None
     created_cycle_data['last_order_fill_price'] = None
+    created_cycle_data['highest_trailing_price'] = None
     created_cycle_data['completed_at'] = None
     
     mock_execute_query.side_effect = [
@@ -128,6 +161,31 @@ def test_create_cycle_with_defaults(mock_execute_query, sample_cycle_data):
     assert result.quantity == Decimal('0')
     assert result.safety_orders == 0
     assert result.latest_order_id is None
+    assert result.highest_trailing_price is None
+
+
+@pytest.mark.unit
+@patch('models.cycle_data.execute_query')
+def test_create_cycle_with_trailing_status(mock_execute_query, sample_cycle_data):
+    """Test cycle creation with trailing status and highest_trailing_price."""
+    created_cycle_data = sample_cycle_data.copy()
+    created_cycle_data['status'] = 'trailing'
+    created_cycle_data['highest_trailing_price'] = Decimal('52000.00')
+    
+    mock_execute_query.side_effect = [
+        123,  # INSERT result
+        created_cycle_data  # SELECT result
+    ]
+    
+    result = create_cycle(
+        asset_id=1, 
+        status='trailing',
+        highest_trailing_price=Decimal('52000.00')
+    )
+    
+    assert isinstance(result, DcaCycle)
+    assert result.status == 'trailing'
+    assert result.highest_trailing_price == Decimal('52000.00')
 
 
 @pytest.mark.unit

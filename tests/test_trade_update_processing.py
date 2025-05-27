@@ -57,6 +57,8 @@ class TestBuyFillProcessing:
             'latest_order_id': 'test_order_123',
             'latest_order_created_at': datetime.now(),
             'last_order_fill_price': None,
+            'highest_trailing_price': None,
+            'sell_price': None,
             'completed_at': None,
             'created_at': datetime.now(),
             'updated_at': datetime.now()

@@ -43,6 +43,8 @@ def sample_asset_data():
         'max_safety_orders': 5,
         'safety_order_deviation': Decimal('2.0'),
         'take_profit_percent': Decimal('1.5'),
+        'ttp_enabled': False,
+        'ttp_deviation_percent': None,
         'cooldown_period': 300,
         'buy_order_price_deviation_percent': Decimal('3.0'),
         'last_sell_price': Decimal('50000.00'),
@@ -67,7 +69,9 @@ def sample_cycle_data():
         'latest_order_id': 'order123',
         'latest_order_created_at': datetime.now(),
         'last_order_fill_price': Decimal('49000.00'),
+        'highest_trailing_price': None,
         'completed_at': None,
+        'sell_price': None,
         'created_at': datetime.now(),
         'updated_at': datetime.now()
     } 

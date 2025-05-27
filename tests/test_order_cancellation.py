@@ -56,7 +56,8 @@ async def test_order_cancellation_handles_update_failure(caplog):
         'id': 99, 'asset_id': 4, 'status': 'buying',
         'quantity': Decimal('0'), 'average_purchase_price': Decimal('0'),
         'safety_orders': 0, 'latest_order_id': 'failed_update_order',
-        'latest_order_created_at': None, 'last_order_fill_price': None, 
+        'latest_order_created_at': None, 'last_order_fill_price': None,
+        'highest_trailing_price': None, 'sell_price': None,
         'completed_at': None, 'created_at': None, 'updated_at': None
     }
     
@@ -89,6 +90,7 @@ async def test_buy_order_cancellation_calls_update_cycle_correctly():
         'quantity': Decimal('0'), 'average_purchase_price': Decimal('0'),
         'safety_orders': 0, 'latest_order_id': 'test_order_123',
         'latest_order_created_at': None, 'last_order_fill_price': None,
+        'highest_trailing_price': None, 'sell_price': None,
         'completed_at': None, 'created_at': None, 'updated_at': None
     }
     
@@ -130,6 +132,7 @@ async def test_sell_order_cancellation_with_remaining_position():
         'quantity': Decimal('1.0'), 'average_purchase_price': Decimal('3000.0'),
         'safety_orders': 1, 'latest_order_id': 'sell_order_456',
         'latest_order_created_at': None, 'last_order_fill_price': Decimal('2950.0'),
+        'highest_trailing_price': None, 'sell_price': None,
         'completed_at': None, 'created_at': None, 'updated_at': None
     }
     
@@ -180,6 +183,7 @@ async def test_sell_order_cancellation_with_zero_position():
         'quantity': Decimal('0.01'), 'average_purchase_price': Decimal('50000.0'),
         'safety_orders': 0, 'latest_order_id': 'sell_order_789',
         'latest_order_created_at': None, 'last_order_fill_price': Decimal('49000.0'),
+        'highest_trailing_price': None, 'sell_price': None,
         'completed_at': None, 'created_at': None, 'updated_at': None
     }
     
@@ -248,6 +252,7 @@ async def test_sell_order_cancellation_alpaca_client_failure():
         'quantity': Decimal('2.0'), 'average_purchase_price': Decimal('150.0'),
         'safety_orders': 1, 'latest_order_id': 'sell_order_fail',
         'latest_order_created_at': None, 'last_order_fill_price': Decimal('145.0'),
+        'highest_trailing_price': None, 'sell_price': None,
         'completed_at': None, 'created_at': None, 'updated_at': None
     }
     

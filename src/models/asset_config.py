@@ -31,6 +31,8 @@ class DcaAsset:
     max_safety_orders: int
     safety_order_deviation: Decimal
     take_profit_percent: Decimal
+    ttp_enabled: bool
+    ttp_deviation_percent: Optional[Decimal]
     cooldown_period: int
     buy_order_price_deviation_percent: Decimal
     last_sell_price: Optional[Decimal]
@@ -57,6 +59,8 @@ class DcaAsset:
             max_safety_orders=data['max_safety_orders'],
             safety_order_deviation=Decimal(str(data['safety_order_deviation'])),
             take_profit_percent=Decimal(str(data['take_profit_percent'])),
+            ttp_enabled=bool(data['ttp_enabled']),
+            ttp_deviation_percent=Decimal(str(data['ttp_deviation_percent'])) if data['ttp_deviation_percent'] is not None else None,
             cooldown_period=data['cooldown_period'],
             buy_order_price_deviation_percent=Decimal(str(data['buy_order_price_deviation_percent'])),
             last_sell_price=Decimal(str(data['last_sell_price'])) if data['last_sell_price'] is not None else None,
@@ -82,7 +86,8 @@ def get_asset_config(asset_symbol: str) -> Optional[DcaAsset]:
         query = """
         SELECT id, asset_symbol, is_enabled, base_order_amount, safety_order_amount,
                max_safety_orders, safety_order_deviation, take_profit_percent,
-               cooldown_period, buy_order_price_deviation_percent, last_sell_price,
+               ttp_enabled, ttp_deviation_percent, cooldown_period, 
+               buy_order_price_deviation_percent, last_sell_price,
                created_at, updated_at
         FROM dca_assets 
         WHERE asset_symbol = %s
@@ -122,7 +127,8 @@ def get_asset_config_by_id(asset_id: int) -> Optional[DcaAsset]:
         query = """
         SELECT id, asset_symbol, is_enabled, base_order_amount, safety_order_amount,
                max_safety_orders, safety_order_deviation, take_profit_percent,
-               cooldown_period, buy_order_price_deviation_percent, last_sell_price,
+               ttp_enabled, ttp_deviation_percent, cooldown_period, 
+               buy_order_price_deviation_percent, last_sell_price,
                created_at, updated_at
         FROM dca_assets 
         WHERE id = %s
@@ -159,7 +165,8 @@ def get_all_enabled_assets() -> List[DcaAsset]:
         query = """
         SELECT id, asset_symbol, is_enabled, base_order_amount, safety_order_amount,
                max_safety_orders, safety_order_deviation, take_profit_percent,
-               cooldown_period, buy_order_price_deviation_percent, last_sell_price,
+               ttp_enabled, ttp_deviation_percent, cooldown_period, 
+               buy_order_price_deviation_percent, last_sell_price,
                created_at, updated_at
         FROM dca_assets 
         WHERE is_enabled = TRUE

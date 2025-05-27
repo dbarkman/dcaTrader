@@ -212,7 +212,7 @@ def identify_stuck_sell_orders(current_time: datetime) -> List[DcaCycle]:
         query = """
         SELECT id, asset_id, status, quantity, average_purchase_price, 
                safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-               completed_at, created_at, updated_at, sell_price
+               highest_trailing_price, completed_at, created_at, updated_at, sell_price
         FROM dca_cycles 
         WHERE status = 'selling' 
         AND latest_order_id IS NOT NULL 

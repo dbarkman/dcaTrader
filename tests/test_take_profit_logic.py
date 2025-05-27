@@ -36,6 +36,8 @@ class TestTakeProfitConditions:
         self.mock_asset_config.take_profit_percent = Decimal('1.0')  # 1%
         self.mock_asset_config.safety_order_deviation = Decimal('2.5')  # 2.5%
         self.mock_asset_config.max_safety_orders = 5
+        self.mock_asset_config.ttp_enabled = False  # TTP disabled for standard tests
+        self.mock_asset_config.ttp_deviation_percent = None
         
         self.mock_cycle = Mock()
         self.mock_cycle.id = 100
@@ -291,6 +293,7 @@ class TestTakeProfitCalculations:
         mock_asset_config.take_profit_percent = Decimal('1.5')
         mock_asset_config.safety_order_deviation = Decimal('2.0')
         mock_asset_config.max_safety_orders = 3
+        mock_asset_config.ttp_enabled = False  # Test standard take-profit behavior
         
         mock_cycle = Mock()
         mock_cycle.id = 200  # Add explicit ID
@@ -452,6 +455,7 @@ class TestTakeProfitErrorHandling:
         mock_asset_config.take_profit_percent = Decimal('1.0')
         mock_asset_config.safety_order_deviation = Decimal('2.5')
         mock_asset_config.max_safety_orders = 5
+        mock_asset_config.ttp_enabled = False  # Test standard take-profit behavior
         
         mock_cycle = Mock()
         mock_cycle.status = 'watching'
@@ -502,6 +506,7 @@ class TestTakeProfitErrorHandling:
         mock_asset_config.take_profit_percent = Decimal('1.0')
         mock_asset_config.safety_order_deviation = Decimal('2.5')
         mock_asset_config.max_safety_orders = 5
+        mock_asset_config.ttp_enabled = False  # Test standard take-profit behavior
         
         mock_cycle = Mock()
         mock_cycle.id = 100

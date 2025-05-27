@@ -559,9 +559,10 @@ def check_and_place_take_profit_order(quote):
             logger.debug(f"No cycle found for asset {symbol}, skipping take-profit check")
             return
         
-        # Step 4: Check if cycle is in 'watching' status with quantity > 0 (existing position)
-        if latest_cycle.status != 'watching':
-            logger.debug(f"Asset {symbol} cycle status is '{latest_cycle.status}', not 'watching' - skipping take-profit")
+        # Step 4: Check if cycle is in valid status for take-profit/TTP processing
+        # Valid statuses: 'watching' (standard TP or TTP activation) or 'trailing' (TTP active)
+        if latest_cycle.status not in ['watching', 'trailing']:
+            logger.debug(f"Asset {symbol} cycle status is '{latest_cycle.status}', not 'watching' or 'trailing' - skipping take-profit")
             return
         
         if latest_cycle.quantity <= Decimal('0'):
@@ -595,7 +596,7 @@ def check_and_place_take_profit_order(quote):
                 logger.debug(f"Safety order would trigger for {symbol} (ask ${ask_price} <= trigger {format_price(safety_trigger_price)}) - skipping take-profit")
                 return
         
-        # Step 7: Calculate take-profit trigger price
+        # Step 7: TTP-aware take-profit logic
         take_profit_percent_decimal = asset_config.take_profit_percent / Decimal('100')  # Convert % to decimal
         take_profit_trigger_price = latest_cycle.average_purchase_price * (Decimal('1') + take_profit_percent_decimal)
         
@@ -608,14 +609,78 @@ def check_and_place_take_profit_order(quote):
         logger.debug(f"   Take Profit %: {asset_config.take_profit_percent}%")
         logger.debug(f"   Take Profit Trigger: {format_price(take_profit_trigger_price)}")
         logger.debug(f"   Current Bid: ${bid_price}")
+        logger.debug(f"   TTP Enabled: {asset_config.ttp_enabled}")
         logger.debug(f"   Safety Order Would Trigger: {safety_order_would_trigger}")
         
-        # Step 8: Check if current bid price has risen enough to trigger take-profit
-        if bid_price_decimal < take_profit_trigger_price:
-            logger.debug(f"Bid price ${bid_price} < take-profit trigger {format_price(take_profit_trigger_price)} - no take-profit needed")
-            return
-        
-        logger.info(f"💰 Take-profit conditions met for {symbol}!")
+        # Step 8: TTP Logic Implementation
+        if not asset_config.ttp_enabled:
+            # Standard take-profit logic (TTP disabled)
+            if bid_price_decimal < take_profit_trigger_price:
+                logger.debug(f"Bid price ${bid_price} < take-profit trigger {format_price(take_profit_trigger_price)} - no take-profit needed")
+                return
+            
+            logger.info(f"💰 Standard take-profit conditions met for {symbol}!")
+            
+        else:
+            # TTP logic (TTP enabled)
+            if latest_cycle.status == 'watching':
+                # TTP not yet activated - check if we should activate it
+                if bid_price_decimal >= take_profit_trigger_price:
+                    # Activate TTP - update cycle to 'trailing' status and set initial peak
+                    logger.info(f"🎯 TTP activated for {symbol}, cycle {latest_cycle.id}. Initial peak: ${bid_price}")
+                    
+                    updates = {
+                        'status': 'trailing',
+                        'highest_trailing_price': bid_price_decimal
+                    }
+                    
+                    update_success = update_cycle(latest_cycle.id, updates)
+                    if update_success:
+                        logger.info(f"✅ Cycle {latest_cycle.id} updated to 'trailing' status with peak ${bid_price}")
+                    else:
+                        logger.error(f"❌ Failed to activate TTP for cycle {latest_cycle.id}")
+                    
+                    return  # Don't place sell order yet, just activated TTP
+                else:
+                    logger.debug(f"TTP enabled but bid price ${bid_price} < activation trigger {format_price(take_profit_trigger_price)} - no action needed")
+                    return
+                    
+            elif latest_cycle.status == 'trailing':
+                # TTP is active - check for new peak or sell trigger
+                current_peak = latest_cycle.highest_trailing_price or Decimal('0')
+                
+                if bid_price_decimal > current_peak:
+                    # New peak reached - update highest_trailing_price
+                    logger.info(f"🎯 TTP new peak for {symbol}, cycle {latest_cycle.id}: ${bid_price}")
+                    
+                    updates = {
+                        'highest_trailing_price': bid_price_decimal
+                    }
+                    
+                    update_success = update_cycle(latest_cycle.id, updates)
+                    if update_success:
+                        logger.debug(f"Updated highest_trailing_price to ${bid_price} for cycle {latest_cycle.id}")
+                    else:
+                        logger.error(f"❌ Failed to update TTP peak for cycle {latest_cycle.id}")
+                    
+                    return  # Don't sell yet, just updated peak
+                    
+                else:
+                    # Check if price has dropped enough to trigger TTP sell
+                    if asset_config.ttp_deviation_percent is None:
+                        logger.error(f"TTP enabled for {symbol} but ttp_deviation_percent is None - cannot calculate sell trigger")
+                        return
+                    
+                    ttp_deviation_decimal = asset_config.ttp_deviation_percent / Decimal('100')
+                    ttp_sell_trigger_price = current_peak * (Decimal('1') - ttp_deviation_decimal)
+                    
+                    if bid_price_decimal < ttp_sell_trigger_price:
+                        # TTP sell triggered!
+                        logger.info(f"🎯 TTP sell triggered for {symbol}, cycle {latest_cycle.id}. Peak: ${current_peak}, Deviation: {asset_config.ttp_deviation_percent}%, Current Price: ${bid_price}")
+                        logger.info(f"💰 TTP conditions met for {symbol}!")
+                    else:
+                        logger.debug(f"TTP active but bid price ${bid_price} >= sell trigger {format_price(ttp_sell_trigger_price)} - no sell needed")
+                        return
         
         # Step 9: Validate market data
         if not bid_price or bid_price <= 0:
@@ -664,17 +729,28 @@ def check_and_place_take_profit_order(quote):
         estimated_cost = latest_cycle.average_purchase_price * latest_cycle.quantity
         estimated_profit = estimated_proceeds - estimated_cost
         
-        logger.info(f"📊 Take-Profit Analysis for {symbol}:")
+        # Determine order type for logging
+        order_type_desc = "TTP" if asset_config.ttp_enabled else "TAKE-PROFIT"
+        
+        logger.info(f"📊 {order_type_desc} Analysis for {symbol}:")
         logger.info(f"   Avg Purchase: {format_price(latest_cycle.average_purchase_price)} | Current Bid: {format_price(bid_price)}")
         logger.info(f"   Price Gain: {format_price(price_gain)} ({price_gain_pct:.2f}%)")
         logger.info(f"   Take-Profit Trigger: {format_price(take_profit_trigger_price)} ({asset_config.take_profit_percent}% gain)")
+        
+        if asset_config.ttp_enabled and latest_cycle.status == 'trailing':
+            current_peak = latest_cycle.highest_trailing_price or Decimal('0')
+            ttp_deviation_decimal = asset_config.ttp_deviation_percent / Decimal('100')
+            ttp_sell_trigger_price = current_peak * (Decimal('1') - ttp_deviation_decimal)
+            logger.info(f"   TTP Peak: {format_price(current_peak)} | TTP Deviation: {asset_config.ttp_deviation_percent}%")
+            logger.info(f"   TTP Sell Trigger: {format_price(ttp_sell_trigger_price)}")
+        
         logger.info(f"   Position: {latest_cycle.quantity} {symbol.split('/')[0]}")
         logger.info(f"   Est. Proceeds: ${estimated_proceeds:.2f} | Est. Cost: ${estimated_cost:.2f}")
         logger.info(f"   Est. Profit: ${estimated_profit:.2f}")
         
         # Step 12: Place the market sell order
         logger.info(f"🔄 Placing MARKET SELL order for {symbol}:")
-        logger.info(f"   Type: MARKET | Side: SELL | Order Type: TAKE-PROFIT")
+        logger.info(f"   Type: MARKET | Side: SELL | Order Type: {order_type_desc}")
         logger.info(f"   Quantity: {format_quantity(sell_quantity)}")
         logger.info(f"   Current Bid: {format_price(bid_price)}")
         logger.info(f"   💰 Selling entire position at market price")
@@ -697,7 +773,7 @@ def check_and_place_take_profit_order(quote):
             logger.info(f"   Order ID: {order.id}")
             logger.info(f"   Quantity: {format_quantity(sell_quantity)}")
             logger.info(f"   Order Type: MARKET")
-            logger.info(f"   💰 Take-profit triggered by {price_gain_pct:.2f}% gain")
+            logger.info(f"   💰 {order_type_desc} triggered by {price_gain_pct:.2f}% gain")
             
             # NEW: Immediately update the cycle to reflect that we're actively trying to sell
             from datetime import timezone
@@ -854,7 +930,7 @@ async def update_cycle_on_buy_fill(order, trade_update):
         cycle_query = """
         SELECT id, asset_id, status, quantity, average_purchase_price, 
                safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-               completed_at, created_at, updated_at
+               highest_trailing_price, completed_at, created_at, updated_at, sell_price
         FROM dca_cycles 
         WHERE latest_order_id = %s
         """
@@ -1136,7 +1212,7 @@ async def update_cycle_on_sell_fill(order, trade_update):
         cycle_query = """
         SELECT id, asset_id, status, quantity, average_purchase_price, 
                safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-               completed_at, created_at, updated_at
+               highest_trailing_price, completed_at, created_at, updated_at, sell_price
         FROM dca_cycles 
         WHERE latest_order_id = %s
         """
@@ -1289,7 +1365,7 @@ async def update_cycle_on_order_cancellation(order, event):
         cycle_query = """
         SELECT id, asset_id, status, quantity, average_purchase_price, 
                safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-               completed_at, created_at, updated_at
+               highest_trailing_price, completed_at, created_at, updated_at, sell_price
         FROM dca_cycles 
         WHERE latest_order_id = %s
         """

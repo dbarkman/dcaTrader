@@ -29,9 +29,23 @@ def test_dca_asset_from_dict(sample_asset_data):
     assert asset.max_safety_orders == 5
     assert asset.safety_order_deviation == Decimal('2.0')
     assert asset.take_profit_percent == Decimal('1.5')
+    assert asset.ttp_enabled == False
+    assert asset.ttp_deviation_percent is None
     assert asset.cooldown_period == 300
     assert asset.buy_order_price_deviation_percent == Decimal('3.0')
     assert asset.last_sell_price == Decimal('50000.00')
+
+
+@pytest.mark.unit
+def test_dca_asset_from_dict_with_ttp_enabled(sample_asset_data):
+    """Test creating DcaAsset with TTP enabled."""
+    data = sample_asset_data.copy()
+    data['ttp_enabled'] = True
+    data['ttp_deviation_percent'] = Decimal('0.5')
+    
+    asset = DcaAsset.from_dict(data)
+    assert asset.ttp_enabled == True
+    assert asset.ttp_deviation_percent == Decimal('0.5')
 
 
 @pytest.mark.unit
@@ -42,6 +56,18 @@ def test_dca_asset_from_dict_null_last_sell_price(sample_asset_data):
     
     asset = DcaAsset.from_dict(data)
     assert asset.last_sell_price is None
+
+
+@pytest.mark.unit
+def test_dca_asset_from_dict_null_ttp_deviation(sample_asset_data):
+    """Test creating DcaAsset with null ttp_deviation_percent."""
+    data = sample_asset_data.copy()
+    data['ttp_enabled'] = False
+    data['ttp_deviation_percent'] = None
+    
+    asset = DcaAsset.from_dict(data)
+    assert asset.ttp_enabled == False
+    assert asset.ttp_deviation_percent is None
 
 
 @pytest.mark.unit

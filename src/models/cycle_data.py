@@ -32,6 +32,7 @@ class DcaCycle:
     latest_order_id: Optional[str]
     latest_order_created_at: Optional[datetime]
     last_order_fill_price: Optional[Decimal]
+    highest_trailing_price: Optional[Decimal]
     completed_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
@@ -58,6 +59,7 @@ class DcaCycle:
             latest_order_id=data['latest_order_id'],
             latest_order_created_at=data['latest_order_created_at'],
             last_order_fill_price=Decimal(str(data['last_order_fill_price'])) if data['last_order_fill_price'] is not None else None,
+            highest_trailing_price=Decimal(str(data['highest_trailing_price'])) if data['highest_trailing_price'] is not None else None,
             completed_at=data['completed_at'],
             created_at=data['created_at'],
             updated_at=data['updated_at'],
@@ -82,7 +84,7 @@ def get_latest_cycle(asset_id: int) -> Optional[DcaCycle]:
         query = """
         SELECT id, asset_id, status, quantity, average_purchase_price,
                safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-               completed_at, created_at, updated_at, sell_price
+               highest_trailing_price, completed_at, created_at, updated_at, sell_price
         FROM dca_cycles 
         WHERE asset_id = %s
         ORDER BY id DESC
@@ -115,6 +117,7 @@ def create_cycle(
     latest_order_id: Optional[str] = None,
     latest_order_created_at: Optional[datetime] = None,
     last_order_fill_price: Optional[Decimal] = None,
+    highest_trailing_price: Optional[Decimal] = None,
     completed_at: Optional[datetime] = None
 ) -> DcaCycle:
     """
@@ -129,6 +132,7 @@ def create_cycle(
         latest_order_id: ID of the latest order (default: None)
         latest_order_created_at: Timestamp when the latest order was created (default: None)
         last_order_fill_price: Price of the last order fill (default: None)
+        highest_trailing_price: Highest price reached during trailing (default: None)
         completed_at: Completion timestamp (default: None)
         
     Returns:
@@ -141,8 +145,9 @@ def create_cycle(
         query = """
         INSERT INTO dca_cycles (
             asset_id, status, quantity, average_purchase_price,
-            safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price, completed_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            safety_orders, latest_order_id, latest_order_created_at, 
+            last_order_fill_price, highest_trailing_price, completed_at
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
         params = (
@@ -154,6 +159,7 @@ def create_cycle(
             latest_order_id,
             latest_order_created_at,
             last_order_fill_price,
+            highest_trailing_price,
             completed_at
         )
         
@@ -166,7 +172,7 @@ def create_cycle(
             fetch_query = """
             SELECT id, asset_id, status, quantity, average_purchase_price,
                    safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-                   completed_at, created_at, updated_at, sell_price
+                   highest_trailing_price, completed_at, created_at, updated_at, sell_price
             FROM dca_cycles 
             WHERE id = %s
             """
@@ -258,7 +264,7 @@ def get_cycle_by_id(cycle_id: int) -> Optional[DcaCycle]:
         query = """
         SELECT id, asset_id, status, quantity, average_purchase_price,
                safety_orders, latest_order_id, latest_order_created_at, last_order_fill_price,
-               completed_at, created_at, updated_at, sell_price
+               highest_trailing_price, completed_at, created_at, updated_at, sell_price
         FROM dca_cycles 
         WHERE id = %s
         """

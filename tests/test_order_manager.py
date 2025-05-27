@@ -353,6 +353,7 @@ class TestOrderManager(unittest.TestCase):
                 'quantity': Decimal('1.0'), 'average_purchase_price': Decimal('50000.0'),
                 'safety_orders': 0, 'latest_order_id': 'stuck_order_123',
                 'latest_order_created_at': stuck_time, 'last_order_fill_price': None,
+                'highest_trailing_price': None, 'sell_price': None,
                 'completed_at': None, 'created_at': self.current_time, 'updated_at': self.current_time
             },
             {
@@ -360,6 +361,7 @@ class TestOrderManager(unittest.TestCase):
                 'quantity': Decimal('0.5'), 'average_purchase_price': Decimal('3000.0'),
                 'safety_orders': 1, 'latest_order_id': 'recent_order_456',
                 'latest_order_created_at': recent_time, 'last_order_fill_price': None,
+                'highest_trailing_price': None, 'sell_price': None,
                 'completed_at': None, 'created_at': self.current_time, 'updated_at': self.current_time
             }
         ]
@@ -409,7 +411,8 @@ class TestOrderManager(unittest.TestCase):
             quantity=Decimal('1.0'), average_purchase_price=Decimal('50000.0'),
             safety_orders=0, latest_order_id='stuck_order_123',
             latest_order_created_at=self.current_time - timedelta(seconds=100),
-            last_order_fill_price=None, completed_at=None,
+            last_order_fill_price=None, highest_trailing_price=None,
+            completed_at=None, sell_price=None,
             created_at=self.current_time, updated_at=self.current_time
         )
         
@@ -448,7 +451,8 @@ class TestOrderManager(unittest.TestCase):
             quantity=Decimal('1.0'), average_purchase_price=Decimal('50000.0'),
             safety_orders=0, latest_order_id='filled_order_123',
             latest_order_created_at=self.current_time - timedelta(seconds=100),
-            last_order_fill_price=None, completed_at=None,
+            last_order_fill_price=None, highest_trailing_price=None,
+            completed_at=None, sell_price=None,
             created_at=self.current_time, updated_at=self.current_time
         )
         
@@ -484,7 +488,8 @@ class TestOrderManager(unittest.TestCase):
             quantity=Decimal('1.0'), average_purchase_price=Decimal('50000.0'),
             safety_orders=0, latest_order_id='missing_order_123',
             latest_order_created_at=self.current_time - timedelta(seconds=100),
-            last_order_fill_price=None, completed_at=None,
+            last_order_fill_price=None, highest_trailing_price=None,
+            completed_at=None, sell_price=None,
             created_at=self.current_time, updated_at=self.current_time
         )
         
