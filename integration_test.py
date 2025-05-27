@@ -5626,11 +5626,50 @@ def main():
             else:
                 print("❌ Invalid input. Please type 'YES' or 'NO'")
     
-    # Check if .env file exists
-    if not os.path.exists('.env'):
-        print("❌ ERROR: .env file not found. Please create it with database credentials.")
-        print("Refer to README.md for required environment variables.")
+    # Load test environment from .env.test
+    env_test_path = '.env.test'
+    if not os.path.exists(env_test_path):
+        print("❌ ERROR: .env.test file not found!")
+        print("Please create .env.test with test database and Alpaca credentials.")
+        print("This ensures integration tests don't accidentally use production environment.")
         return
+    
+    print("🔧 Loading test environment from .env.test...")
+    
+    # Load environment variables from .env.test
+    with open(env_test_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                # Remove quotes if present
+                value = value.strip('"\'')
+                os.environ[key] = value
+    
+    # Verify critical test environment variables are set
+    required_vars = [
+        'APCA_API_KEY_ID', 'APCA_API_SECRET_KEY', 'APCA_API_BASE_URL',
+        'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME'
+    ]
+    
+    missing_vars = [var for var in required_vars if not os.environ.get(var)]
+    if missing_vars:
+        print(f"❌ ERROR: Missing required test environment variables: {missing_vars}")
+        return
+    
+    # Verify we're using test/paper environment
+    if 'paper-api.alpaca.markets' not in os.environ.get('APCA_API_BASE_URL', ''):
+        print("❌ ERROR: Integration tests must use Alpaca paper trading!")
+        print(f"Current APCA_API_BASE_URL: {os.environ.get('APCA_API_BASE_URL')}")
+        return
+    
+    if 'test' not in os.environ.get('DB_NAME', '').lower():
+        print("⚠️ WARNING: Database name should contain 'test' for safety")
+        print(f"Current DB_NAME: {os.environ.get('DB_NAME')}")
+    
+    print(f"✅ Test environment loaded:")
+    print(f"   • Alpaca: {os.environ.get('APCA_API_BASE_URL')}")
+    print(f"   • Database: {os.environ.get('DB_NAME')} on {os.environ.get('DB_HOST')}")
     
     # Parse command line arguments for phase selection
     if phase_arg:
