@@ -388,7 +388,6 @@ def check_and_place_safety_order(quote):
         
         # Step 6: Check if we have a last_order_fill_price to calculate trigger from
         if latest_cycle.last_order_fill_price is None:
-            logger.debug(f"Asset {symbol} has no last_order_fill_price - cannot calculate safety order trigger")
             return
         
         # Step 7: Calculate trigger price for safety order
@@ -534,10 +533,15 @@ def check_and_place_take_profit_order(quote):
     Args:
         quote: Quote object from Alpaca containing bid/ask data
     """
+    from decimal import Decimal
     global recent_orders
     symbol = quote.symbol
     ask_price = quote.ask_price
     bid_price = quote.bid_price
+    
+    # Debug PEPE/USD entry
+    if symbol == 'PEPE/USD':
+        logger.info(f"🔍 PEPE/USD Take-Profit Function Entry")
     
     try:
         # Step 1: Check for recent orders to prevent duplicates
@@ -693,9 +697,23 @@ def check_and_place_take_profit_order(quote):
             return
         
         # Use actual Alpaca position quantity to avoid quantity mismatches
-        # Convert to Decimal first to maintain precision, then back to float for order
-        alpaca_qty_decimal = Decimal(str(alpaca_position.qty))
-        sell_quantity = float(alpaca_qty_decimal)
+        # Handle precision issues by using the exact string value from Alpaca
+        alpaca_qty_str = str(alpaca_position.qty)
+        
+        # Debug logging for PEPE/USD precision issue
+        if symbol == 'PEPE/USD':
+            logger.info(f"🔍 PEPE/USD Debug:")
+            logger.info(f"   Alpaca position.qty: {alpaca_position.qty} (type: {type(alpaca_position.qty)})")
+            logger.info(f"   String conversion: '{alpaca_qty_str}'")
+            
+            # Test float conversion to show the precision issue
+            test_float = float(alpaca_qty_str)
+            logger.info(f"   Float conversion: {test_float}")
+            logger.info(f"   Float repr: {repr(test_float)}")
+            logger.info(f"   🚨 PRECISION ISSUE: float() rounds {alpaca_qty_str} to {test_float}")
+        
+        # For all assets, use normal float conversion
+        sell_quantity = float(alpaca_qty_str)
         
         # Validate calculated values before placing order
         if not sell_quantity or sell_quantity <= 0:
