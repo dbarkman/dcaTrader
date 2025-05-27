@@ -24,6 +24,9 @@ from main_app import (
     on_trade_update
 )
 
+# Configure logging for tests
+logging.basicConfig(level=logging.DEBUG)
+
 
 @pytest.mark.unit
 @patch.dict(os.environ, {
@@ -35,7 +38,7 @@ from main_app import (
     'DB_NAME': 'test_db'
 })
 def test_validate_environment_success():
-    """Test successful environment validation."""
+    """Test environment validation with all required variables present."""
     result = validate_environment()
     assert result == True
 
@@ -83,6 +86,14 @@ def test_validate_environment_missing_key():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+@patch.dict(os.environ, {
+    'APCA_API_KEY_ID': 'test_key',
+    'APCA_API_SECRET_KEY': 'test_secret',
+    'DB_HOST': 'localhost',
+    'DB_USER': 'test_user',
+    'DB_PASSWORD': 'test_pass',
+    'DB_NAME': 'test_db'
+})
 @patch('main_app.check_and_place_base_order')
 async def test_on_crypto_quote_handler(mock_check_base_order, caplog):
     """Test cryptocurrency quote handler with mock quote data."""
@@ -114,6 +125,14 @@ async def test_on_crypto_quote_handler(mock_check_base_order, caplog):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+@patch.dict(os.environ, {
+    'APCA_API_KEY_ID': 'test_key',
+    'APCA_API_SECRET_KEY': 'test_secret',
+    'DB_HOST': 'localhost',
+    'DB_USER': 'test_user',
+    'DB_PASSWORD': 'test_pass',
+    'DB_NAME': 'test_db'
+})
 async def test_on_crypto_trade_handler(caplog):
     """Test cryptocurrency trade handler with mock trade data."""
     # Create a mock trade object
@@ -139,6 +158,14 @@ async def test_on_crypto_trade_handler(caplog):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+@patch.dict(os.environ, {
+    'APCA_API_KEY_ID': 'test_key',
+    'APCA_API_SECRET_KEY': 'test_secret',
+    'DB_HOST': 'localhost',
+    'DB_USER': 'test_user',
+    'DB_PASSWORD': 'test_pass',
+    'DB_NAME': 'test_db'
+})
 async def test_on_crypto_bar_handler(caplog):
     """Test cryptocurrency bar handler with mock bar data."""
     # Create a mock bar object
@@ -169,8 +196,20 @@ async def test_on_crypto_bar_handler(caplog):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_on_trade_update_handler_basic(caplog):
+@patch.dict(os.environ, {
+    'APCA_API_KEY_ID': 'test_key',
+    'APCA_API_SECRET_KEY': 'test_secret',
+    'DB_HOST': 'localhost',
+    'DB_USER': 'test_user',
+    'DB_PASSWORD': 'test_pass',
+    'DB_NAME': 'test_db'
+})
+@patch('main_app.execute_query')
+async def test_on_trade_update_handler_basic(mock_execute_query, caplog):
     """Test trade update handler with basic order data."""
+    # Mock database query to return None (no cycle found)
+    mock_execute_query.return_value = None
+    
     # Create a mock trade update object
     mock_trade_update = MagicMock()
     mock_trade_update.event = 'fill'
@@ -217,8 +256,20 @@ async def test_on_trade_update_handler_basic(caplog):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_on_trade_update_handler_with_execution(caplog):
+@patch.dict(os.environ, {
+    'APCA_API_KEY_ID': 'test_key',
+    'APCA_API_SECRET_KEY': 'test_secret',
+    'DB_HOST': 'localhost',
+    'DB_USER': 'test_user',
+    'DB_PASSWORD': 'test_pass',
+    'DB_NAME': 'test_db'
+})
+@patch('main_app.execute_query')
+async def test_on_trade_update_handler_with_execution(mock_execute_query, caplog):
     """Test trade update handler with execution details."""
+    # Mock database query to return None (no cycle found)
+    mock_execute_query.return_value = None
+    
     # Create a mock trade update object
     mock_trade_update = MagicMock()
     mock_trade_update.event = 'partial_fill'
