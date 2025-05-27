@@ -208,21 +208,7 @@ def setup_logging(
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
     
-    # Create a separate handler for asset lifecycle logs
-    if enable_asset_tracking:
-        asset_log_file = config.log_dir / f"{app_name}_assets.log"
-        asset_handler = logging.handlers.RotatingFileHandler(
-            asset_log_file,
-            maxBytes=config.log_max_bytes,
-            backupCount=config.log_backup_count,
-            encoding='utf-8'
-        )
-        asset_handler.setLevel(file_level_int)
-        asset_handler.setFormatter(file_formatter)
-        
-        # Add a filter to only log messages with asset context
-        asset_handler.addFilter(lambda record: hasattr(record, 'asset_symbol'))
-        logger.addHandler(asset_handler)
+    # Asset logs are included in the main log file (no separate asset file)
     
     # Log the logging setup
     setup_logger = logging.getLogger(__name__)
@@ -380,22 +366,7 @@ def setup_main_app_logging(
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
     
-    # Create a separate handler for asset lifecycle logs (also time-based)
-    if enable_asset_tracking:
-        asset_log_file = config.log_dir / "main_assets.log"
-        asset_handler = GzipTimedRotatingFileHandler(
-            asset_log_file,
-            when='midnight',
-            interval=1,
-            backupCount=7,
-            encoding='utf-8'
-        )
-        asset_handler.setLevel(file_level_int)
-        asset_handler.setFormatter(file_formatter)
-        
-        # Add a filter to only log messages with asset context
-        asset_handler.addFilter(lambda record: hasattr(record, 'asset_symbol'))
-        logger.addHandler(asset_handler)
+    # Asset logs are included in main.log (no separate asset file for main app)
     
     # Log the logging setup
     setup_logger = logging.getLogger(__name__)
@@ -417,6 +388,9 @@ def setup_caretaker_logging(
     """
     Set up logging for caretaker scripts.
     
+    All caretaker scripts log to the same caretakers.log file for consolidation.
+    Asset logs are also included in caretakers.log (no separate asset file).
+    
     Args:
         script_name: Name of the caretaker script (e.g., 'order_manager', 'cooldown_manager')
         console_level: Console logging level (defaults to config.log_level)
@@ -426,12 +400,68 @@ def setup_caretaker_logging(
     Returns:
         Configured logger for the caretaker script
     """
-    return setup_logging(
-        app_name=f"caretakers_{script_name}",
-        console_level=console_level,
-        file_level=file_level,
-        enable_asset_tracking=enable_asset_tracking
+    # Get log levels from config or use provided values
+    console_level = console_level or config.log_level
+    file_level = file_level or config.log_level
+    
+    # Convert string levels to logging constants
+    console_level_int = getattr(logging, console_level.upper(), logging.INFO)
+    file_level_int = getattr(logging, file_level.upper(), logging.INFO)
+    
+    # Ensure logs directory exists
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create formatters
+    if enable_asset_tracking:
+        console_formatter = AssetLifecycleFormatter(include_asset_prefix=True)
+        file_formatter = AssetLifecycleFormatter(include_asset_prefix=True)
+    else:
+        # Standard formatters without asset tracking
+        console_format = '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+        console_formatter = logging.Formatter(console_format, datefmt='%Y-%m-%d %H:%M:%S')
+        file_formatter = logging.Formatter(console_format, datefmt='%Y-%m-%d %H:%M:%S')
+    
+    # During testing, use individual loggers instead of root logger to allow pytest capture
+    import sys
+    if 'pytest' in sys.modules:
+        # Use individual logger for pytest compatibility
+        logger = logging.getLogger(f"caretakers_{script_name}")
+        logger.setLevel(logging.DEBUG)
+        logger.handlers.clear()
+        logger.propagate = True  # Allow pytest to capture logs
+    else:
+        # Use root logger for production
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
+        logger.handlers.clear()
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(console_level_int)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # Single file handler for caretakers.log (includes all logs, including asset logs)
+    log_file = config.log_dir / "caretakers.log"
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=config.log_max_bytes,
+        backupCount=config.log_backup_count,
+        encoding='utf-8'
     )
+    file_handler.setLevel(file_level_int)
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    
+    # Log the logging setup
+    setup_logger = logging.getLogger(__name__)
+    setup_logger.info(f"Caretaker logging configured for {script_name}")
+    setup_logger.info(f"Console level: {console_level}, File level: {file_level}")
+    setup_logger.info(f"Log directory: {config.log_dir}")
+    setup_logger.info(f"Log file: caretakers.log (consolidated)")
+    setup_logger.info(f"Asset tracking: {'Enabled' if enable_asset_tracking else 'Disabled'}")
+    
+    return logger
 
 
 def setup_script_logging(script_name: str) -> logging.Logger:
