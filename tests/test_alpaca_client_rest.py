@@ -10,7 +10,9 @@ import os
 from src.utils.alpaca_client_rest import (
     get_trading_client,
     get_account_info,
-    get_latest_crypto_price
+    get_latest_crypto_price,
+    get_latest_crypto_quote,
+    get_api_credentials_from_client
 )
 
 
@@ -126,7 +128,7 @@ def test_get_latest_crypto_price_parsing(mock_crypto_client_class):
     # Call the function
     result = get_latest_crypto_price(mock_trading_client, 'BTC/USD')
     
-    # Verify the crypto client was initialized correctly
+    # Verify the crypto client was initialized correctly (no paper parameter)
     mock_crypto_client_class.assert_called_once_with(
         api_key='test_key_id',
         secret_key='test_secret_key'
@@ -186,4 +188,127 @@ def test_get_latest_crypto_price_api_error(mock_crypto_client_class):
     result = get_latest_crypto_price(mock_trading_client, 'BTC/USD')
     
     # Verify it returns None on error
-    assert result is None 
+    assert result is None
+
+
+@pytest.mark.unit
+@patch('src.utils.alpaca_client_rest.CryptoHistoricalDataClient')
+def test_get_latest_crypto_price_with_provided_keys(mock_crypto_client_class):
+    """Test that get_latest_crypto_price works with directly provided API keys"""
+    
+    # Create mock TradingClient
+    mock_trading_client = Mock()
+    
+    # Create mock crypto data client
+    mock_crypto_client = Mock()
+    mock_crypto_client_class.return_value = mock_crypto_client
+    
+    # Create mock trade data
+    mock_trade = Mock()
+    mock_trade.price = 45000.50
+    
+    # Configure the mock to return trade data
+    mock_crypto_client.get_crypto_latest_trade.return_value = {
+        'BTC/USD': mock_trade
+    }
+    
+    # Call the function with provided keys (no environment variables needed)
+    result = get_latest_crypto_price(
+        mock_trading_client, 
+        'BTC/USD',
+        api_key='direct_key',
+        secret_key='direct_secret',
+        paper=False  # This parameter is ignored for crypto client
+    )
+    
+    # Verify the crypto client was initialized with provided keys (no paper parameter)
+    mock_crypto_client_class.assert_called_once_with(
+        api_key='direct_key',
+        secret_key='direct_secret'
+    )
+    
+    # Verify the result is the expected price
+    assert result == 45000.50
+
+
+@pytest.mark.unit
+@patch('src.utils.alpaca_client_rest.CryptoHistoricalDataClient')
+@patch.dict(os.environ, {
+    'APCA_API_KEY_ID': 'test_key_id',
+    'APCA_API_SECRET_KEY': 'test_secret_key',
+    'APCA_API_BASE_URL': 'https://api.alpaca.markets'  # Live trading URL
+})
+def test_get_latest_crypto_quote_live_trading(mock_crypto_client_class):
+    """Test that get_latest_crypto_quote correctly processes quote data"""
+    
+    # Create mock TradingClient
+    mock_trading_client = Mock()
+    
+    # Create mock crypto data client
+    mock_crypto_client = Mock()
+    mock_crypto_client_class.return_value = mock_crypto_client
+    
+    # Create mock quote data
+    mock_quote = Mock()
+    mock_quote.bid_price = 44950.0
+    mock_quote.ask_price = 45050.0
+    
+    # Configure the mock to return quote data
+    mock_crypto_client.get_crypto_latest_quote.return_value = {
+        'BTC/USD': mock_quote
+    }
+    
+    # Call the function
+    result = get_latest_crypto_quote(mock_trading_client, 'BTC/USD')
+    
+    # Verify the crypto client was initialized correctly (no paper parameter)
+    mock_crypto_client_class.assert_called_once_with(
+        api_key='test_key_id',
+        secret_key='test_secret_key'
+    )
+    
+    # Verify the result contains bid/ask prices
+    assert result == {'bid': 44950.0, 'ask': 45050.0}
+
+
+@pytest.mark.unit
+def test_get_api_credentials_from_client():
+    """Test extracting API credentials from a TradingClient"""
+    
+    # Create mock TradingClient with private attributes
+    mock_client = Mock()
+    mock_client._api_key = 'extracted_key'
+    mock_client._secret_key = 'extracted_secret'
+    mock_client._paper = True
+    
+    # Call the helper function
+    api_key, secret_key, paper = get_api_credentials_from_client(mock_client)
+    
+    # Verify the credentials were extracted correctly
+    assert api_key == 'extracted_key'
+    assert secret_key == 'extracted_secret'
+    assert paper == True
+
+
+@pytest.mark.unit
+@patch.dict(os.environ, {
+    'APCA_API_KEY_ID': 'fallback_key',
+    'APCA_API_SECRET_KEY': 'fallback_secret',
+    'APCA_API_BASE_URL': 'https://paper-api.alpaca.markets'
+})
+def test_get_api_credentials_from_client_fallback():
+    """Test that get_api_credentials_from_client falls back to environment variables"""
+    
+    # Create a simple object without the private attributes
+    class MockClientWithoutAttrs:
+        pass
+    
+    mock_client = MockClientWithoutAttrs()
+    
+    # Call the helper function
+    api_key, secret_key, paper = get_api_credentials_from_client(mock_client)
+    
+    # Verify it fell back to environment variables
+    assert api_key == 'fallback_key'
+    assert secret_key == 'fallback_secret'
+    assert paper == True 

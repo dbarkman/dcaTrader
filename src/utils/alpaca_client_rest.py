@@ -76,25 +76,84 @@ def get_account_info(client: TradingClient) -> Optional[TradeAccount]:
         return None
 
 
-def get_latest_crypto_price(client: TradingClient, symbol: str) -> Optional[float]:
+def get_api_credentials_from_client(client: TradingClient) -> tuple[str, str, bool]:
+    """
+    Extract API credentials from an existing TradingClient instance.
+    
+    This helper function allows callers to reuse credentials from an existing
+    TradingClient when calling crypto data functions, avoiding environment
+    variable lookups.
+    
+    Args:
+        client: Initialized TradingClient
+        
+    Returns:
+        Tuple of (api_key, secret_key, paper) extracted from the client
+        
+    Note:
+        This function accesses private attributes of the TradingClient.
+        If the alpaca-py SDK changes its internal structure, this may need updates.
+    """
+    try:
+        # Access the client's configuration
+        # Note: These are private attributes and may change in future SDK versions
+        api_key = getattr(client, '_api_key', None)
+        secret_key = getattr(client, '_secret_key', None) 
+        paper = getattr(client, '_paper', None)
+        
+        # Fallback to environment if attributes not found
+        if not api_key:
+            api_key = os.getenv('APCA_API_KEY_ID')
+        if not secret_key:
+            secret_key = os.getenv('APCA_API_SECRET_KEY')
+        if paper is None:
+            base_url = os.getenv('APCA_API_BASE_URL', 'https://paper-api.alpaca.markets')
+            paper = 'paper-api' in base_url
+            
+        return api_key, secret_key, paper
+        
+    except Exception as e:
+        logger.warning(f"Could not extract credentials from TradingClient: {e}")
+        # Fallback to environment variables
+        api_key = os.getenv('APCA_API_KEY_ID')
+        secret_key = os.getenv('APCA_API_SECRET_KEY')
+        base_url = os.getenv('APCA_API_BASE_URL', 'https://paper-api.alpaca.markets')
+        paper = 'paper-api' in base_url
+        return api_key, secret_key, paper
+
+
+def get_latest_crypto_price(
+    client: TradingClient, 
+    symbol: str, 
+    api_key: Optional[str] = None,
+    secret_key: Optional[str] = None,
+    paper: Optional[bool] = None
+) -> Optional[float]:
     """
     Fetch the latest trade price for a crypto symbol
     
     Args:
         client: Initialized TradingClient
         symbol: Crypto symbol (e.g., 'BTC/USD')
+        api_key: Optional API key (if not provided, fetched from environment)
+        secret_key: Optional secret key (if not provided, fetched from environment)
+        paper: Optional paper trading flag (used for TradingClient, not CryptoHistoricalDataClient)
         
     Returns:
         Latest trade price as float or None if error/no data
     """
     try:
-        # Use CryptoHistoricalDataClient for market data
-        api_key = os.getenv('APCA_API_KEY_ID')
-        api_secret = os.getenv('APCA_API_SECRET_KEY')
+        # Use provided keys or fall back to environment variables
+        if api_key is None:
+            api_key = os.getenv('APCA_API_KEY_ID')
+        if secret_key is None:
+            secret_key = os.getenv('APCA_API_SECRET_KEY')
         
+        # CryptoHistoricalDataClient doesn't use paper parameter
+        # It automatically determines the correct endpoint based on API keys
         crypto_client = CryptoHistoricalDataClient(
             api_key=api_key,
-            secret_key=api_secret
+            secret_key=secret_key
         )
         
         request = CryptoLatestTradeRequest(symbol_or_symbols=symbol)
@@ -113,25 +172,38 @@ def get_latest_crypto_price(client: TradingClient, symbol: str) -> Optional[floa
         return None
 
 
-def get_latest_crypto_quote(client: TradingClient, symbol: str) -> Optional[dict]:
+def get_latest_crypto_quote(
+    client: TradingClient, 
+    symbol: str, 
+    api_key: Optional[str] = None,
+    secret_key: Optional[str] = None,
+    paper: Optional[bool] = None
+) -> Optional[dict]:
     """
     Fetch the latest bid/ask quote for a crypto symbol
     
     Args:
         client: Initialized TradingClient
         symbol: Crypto symbol (e.g., 'BTC/USD')
+        api_key: Optional API key (if not provided, fetched from environment)
+        secret_key: Optional secret key (if not provided, fetched from environment)
+        paper: Optional paper trading flag (used for TradingClient, not CryptoHistoricalDataClient)
         
     Returns:
         Dictionary with 'bid' and 'ask' prices or None if error/no data
     """
     try:
-        # Use CryptoHistoricalDataClient for market data
-        api_key = os.getenv('APCA_API_KEY_ID')
-        api_secret = os.getenv('APCA_API_SECRET_KEY')
+        # Use provided keys or fall back to environment variables
+        if api_key is None:
+            api_key = os.getenv('APCA_API_KEY_ID')
+        if secret_key is None:
+            secret_key = os.getenv('APCA_API_SECRET_KEY')
         
+        # CryptoHistoricalDataClient doesn't use paper parameter
+        # It automatically determines the correct endpoint based on API keys
         crypto_client = CryptoHistoricalDataClient(
             api_key=api_key,
-            secret_key=api_secret
+            secret_key=secret_key
         )
         
         request = CryptoLatestQuoteRequest(symbol_or_symbols=symbol)
