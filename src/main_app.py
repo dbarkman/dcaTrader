@@ -807,8 +807,9 @@ async def on_crypto_trade(trade):
     Args:
         trade: Trade object from Alpaca containing trade data
     """
-    logger.info(f"Trade: {trade.symbol} - Price: ${trade.price}, Size: {trade.size}, "
-               f"Time: {trade.timestamp}")
+    # Trade data is informational only - no logging needed
+    # Bot makes decisions based on quote data, not trade data
+    pass
 
 
 async def on_crypto_bar(bar):
