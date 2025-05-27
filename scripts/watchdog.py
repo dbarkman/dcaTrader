@@ -40,15 +40,11 @@ import psutil
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(project_root / 'logs' / 'watchdog.log'),
-        logging.StreamHandler()
-    ]
-)
+# Import logging configuration
+from src.utils.logging_config import setup_caretaker_logging
+
+# Setup logging
+setup_caretaker_logging("watchdog")
 logger = logging.getLogger(__name__)
 
 # Configuration

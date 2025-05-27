@@ -29,18 +29,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src
 
 # Import our utilities and models
 from utils.db_utils import get_db_connection, execute_query, check_connection
+from utils.logging_config import setup_caretaker_logging
 from models.cycle_data import DcaCycle, get_cycle_by_id, update_cycle
 from models.asset_config import DcaAsset, get_asset_config, get_asset_config_by_id
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('logs/cooldown_manager.log', mode='a') if os.path.exists('logs') else logging.NullHandler()
-    ]
-)
+# Setup logging
+setup_caretaker_logging("cooldown_manager")
 logger = logging.getLogger(__name__)
 
 # Import configuration

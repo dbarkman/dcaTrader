@@ -34,18 +34,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src
 
 # Import our utilities and models
 from utils.db_utils import get_db_connection, execute_query, check_connection
+from utils.logging_config import setup_caretaker_logging
 from utils.alpaca_client_rest import get_trading_client, get_open_orders, cancel_order, get_order
 from models.cycle_data import DcaCycle, get_all_cycles, update_cycle
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('logs/order_manager.log', mode='a') if os.path.exists('logs') else logging.NullHandler()
-    ]
-)
+# Setup logging
+setup_caretaker_logging("order_manager")
 logger = logging.getLogger(__name__)
 
 # Import configuration

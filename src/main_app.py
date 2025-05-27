@@ -32,7 +32,7 @@ import mysql.connector
 
 # Import our configuration and logging
 from config import get_config
-from utils.logging_config import setup_logging, get_asset_logger, log_asset_lifecycle_event
+from utils.logging_config import setup_main_app_logging, get_asset_logger, log_asset_lifecycle_event
 from utils.notifications import alert_order_placed, alert_order_filled, alert_system_error, alert_critical_error
 
 # Import our database models and utilities
@@ -44,7 +44,7 @@ from utils.formatting import format_price, format_quantity, format_percentage
 
 # Initialize configuration and logging
 config = get_config()
-setup_logging("main_app", enable_asset_tracking=True)
+setup_main_app_logging(enable_asset_tracking=True)
 logger = logging.getLogger(__name__)
 
 # Global flag for graceful shutdown

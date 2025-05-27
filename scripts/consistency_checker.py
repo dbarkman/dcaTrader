@@ -24,22 +24,15 @@ from alpaca.common.exceptions import APIError
 import mysql.connector
 from mysql.connector import Error
 
-from utils.logging_config import setup_logging
+from utils.logging_config import setup_caretaker_logging
 from utils.db_utils import execute_query, check_connection
 from utils.alpaca_client_rest import get_trading_client, get_order, get_positions
 from models.cycle_data import get_all_cycles, update_cycle, DcaCycle, create_cycle
 from models.asset_config import get_asset_config_by_id
 from alpaca.trading.client import TradingClient
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('logs/consistency_checker.log', mode='a') if os.path.exists('logs') else logging.NullHandler()
-    ]
-)
+# Setup logging
+setup_caretaker_logging("consistency_checker")
 logger = logging.getLogger(__name__)
 
 # Import configuration

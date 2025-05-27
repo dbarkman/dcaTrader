@@ -37,16 +37,33 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 import psutil
+import logging
 
 # Add src directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from utils.logging_config import setup_logging
-import logging
+# Create isolated logger for app_control (don't use basicConfig)
+logger = logging.getLogger('app_control')
+logger.setLevel(logging.INFO)
 
-# Setup logging
-setup_logging("app_control")
-logger = logging.getLogger(__name__)
+# Only add handlers if they don't already exist
+if not logger.handlers:
+    # File handler
+    file_handler = logging.FileHandler('logs/caretakers.log')
+    file_handler.setLevel(logging.INFO)
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+# Prevent propagation to root logger
+logger.propagate = False
 
 # Configuration
 PROJECT_ROOT = Path(__file__).parent.parent

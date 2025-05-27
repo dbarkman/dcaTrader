@@ -20,14 +20,14 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from utils.db_utils import execute_query
-from utils.logging_config import setup_logging
+from utils.logging_config import setup_caretaker_logging
 from models.asset_config import get_all_enabled_assets
 from models.cycle_data import get_latest_cycle, create_cycle
 from decimal import Decimal
 import logging
 
 # Setup logging
-setup_logging("asset_caretaker")
+setup_caretaker_logging("asset_caretaker")
 logger = logging.getLogger(__name__)
 
 

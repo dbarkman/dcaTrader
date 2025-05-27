@@ -128,18 +128,25 @@ def setup_logging(
         console_formatter = logging.Formatter(console_format, datefmt='%Y-%m-%d %H:%M:%S')
         file_formatter = logging.Formatter(console_format, datefmt='%Y-%m-%d %H:%M:%S')
     
-    # Set up root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)  # Capture all levels, handlers will filter
-    
-    # Clear any existing handlers
-    root_logger.handlers.clear()
+    # During testing, use individual loggers instead of root logger to allow pytest capture
+    import sys
+    if 'pytest' in sys.modules:
+        # Use individual logger for pytest compatibility
+        logger = logging.getLogger(app_name)
+        logger.setLevel(logging.DEBUG)
+        logger.handlers.clear()
+        logger.propagate = True  # Allow pytest to capture logs
+    else:
+        # Use root logger for production
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
+        logger.handlers.clear()
     
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(console_level_int)
     console_handler.setFormatter(console_formatter)
-    root_logger.addHandler(console_handler)
+    logger.addHandler(console_handler)
     
     # File handler with rotation
     log_file = config.log_dir / f"{app_name}.log"
@@ -151,7 +158,7 @@ def setup_logging(
     )
     file_handler.setLevel(file_level_int)
     file_handler.setFormatter(file_formatter)
-    root_logger.addHandler(file_handler)
+    logger.addHandler(file_handler)
     
     # Create a separate handler for asset lifecycle logs
     if enable_asset_tracking:
@@ -167,16 +174,16 @@ def setup_logging(
         
         # Add a filter to only log messages with asset context
         asset_handler.addFilter(lambda record: hasattr(record, 'asset_symbol'))
-        root_logger.addHandler(asset_handler)
+        logger.addHandler(asset_handler)
     
     # Log the logging setup
-    logger = logging.getLogger(__name__)
-    logger.info(f"Logging configured for {app_name}")
-    logger.info(f"Console level: {console_level}, File level: {file_level}")
-    logger.info(f"Log directory: {config.log_dir}")
-    logger.info(f"Asset tracking: {'Enabled' if enable_asset_tracking else 'Disabled'}")
+    setup_logger = logging.getLogger(__name__)
+    setup_logger.info(f"Logging configured for {app_name}")
+    setup_logger.info(f"Console level: {console_level}, File level: {file_level}")
+    setup_logger.info(f"Log directory: {config.log_dir}")
+    setup_logger.info(f"Asset tracking: {'Enabled' if enable_asset_tracking else 'Disabled'}")
     
-    return root_logger
+    return logger
 
 
 def get_asset_logger(asset_symbol: str, base_logger: Optional[logging.Logger] = None) -> AssetContextAdapter:
@@ -249,6 +256,57 @@ def log_asset_lifecycle_event(
     message = f"LIFECYCLE_EVENT:{event_type} | {details_str}"
     
     asset_logger.log(level, message)
+
+
+# Convenience functions for the new consolidated logging approach
+def setup_main_app_logging(
+    console_level: Optional[str] = None,
+    file_level: Optional[str] = None,
+    enable_asset_tracking: bool = True
+) -> logging.Logger:
+    """
+    Set up logging for the main WebSocket application.
+    
+    Args:
+        console_level: Console logging level (defaults to config.log_level)
+        file_level: File logging level (defaults to config.log_level)
+        enable_asset_tracking: Enable asset lifecycle tracking formatting
+    
+    Returns:
+        Configured logger for main_app
+    """
+    return setup_logging(
+        app_name="main_app",
+        console_level=console_level,
+        file_level=file_level,
+        enable_asset_tracking=enable_asset_tracking
+    )
+
+
+def setup_caretaker_logging(
+    script_name: str,
+    console_level: Optional[str] = None,
+    file_level: Optional[str] = None,
+    enable_asset_tracking: bool = True
+) -> logging.Logger:
+    """
+    Set up logging for caretaker scripts.
+    
+    Args:
+        script_name: Name of the caretaker script (e.g., 'order_manager', 'cooldown_manager')
+        console_level: Console logging level (defaults to config.log_level)
+        file_level: File logging level (defaults to config.log_level)
+        enable_asset_tracking: Enable asset lifecycle tracking formatting
+    
+    Returns:
+        Configured logger for the caretaker script
+    """
+    return setup_logging(
+        app_name=f"caretakers_{script_name}",
+        console_level=console_level,
+        file_level=file_level,
+        enable_asset_tracking=enable_asset_tracking
+    )
 
 
 def setup_script_logging(script_name: str) -> logging.Logger:

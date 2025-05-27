@@ -226,16 +226,16 @@ The following cron jobs need to be set up on your Linux server. Ensure the paths
 
 ```cron
 # Watchdog for the main WebSocket application (e.g., runs every 5 minutes)
-*/5 * * * * /path_to_project_venv/venv/bin/python /path_to_project/watchdog.py >> /path_to_project/logs/watchdog.log 2>&1
+*/5 * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/watchdog.py >> /path_to_project/logs/cron.log 2>&1
 
 # Caretaker: Order Manager (e.g., runs every 1 minute)
-* * * * * /path_to_project_venv/venv/bin/python /path_to_project/order_manager.py >> /path_to_project/logs/order_manager.log 2>&1
+* * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/order_manager.py >> /path_to_project/logs/cron.log 2>&1
 
 # Caretaker: Cooldown Manager (e.g., runs every 1 minute)
-* * * * * /path_to_project_venv/venv/bin/python /path_to_project/cooldown_manager.py >> /path_to_project/logs/cooldown_manager.log 2>&1
+* * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/cooldown_manager.py >> /path_to_project/logs/cron.log 2>&1
 
 # Caretaker: Consistency Checker (e.g., runs every 5 minutes)
-*/5 * * * * /path_to_project_venv/venv/bin/python /path_to_project/consistency_checker.py >> /path_to_project/logs/consistency_checker.log 2>&1
+*/5 * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/consistency_checker.py >> /path_to_project/logs/cron.log 2>&1
 ```
 
 Setup notes:
@@ -247,10 +247,18 @@ Example wrapper script: `/path_to_project/run_script_wrapper.sh <script_name.py>
 #!/bin/bash
 cd /path_to_project/
 source venv/bin/activate
-python $1 >> /path_to_project/logs/$1.log 2>&1
+python scripts/$1 >> /path_to_project/logs/cron.log 2>&1
 ```
 
 *Create a logs directory in your project root for the log files.*
+
+**Consolidated Logging Structure:**
+The application uses a consolidated logging approach with three primary log files:
+- `logs/main.log` - All logs from the main WebSocket application (main_app.py)
+- `logs/caretakers.log` - All logs from caretaker scripts (order_manager.py, cooldown_manager.py, consistency_checker.py, watchdog.py, etc.)
+- `logs/cron.log` - Raw stdout/stderr from cron job executions (shell errors, startup issues, etc.)
+
+Python's logging system automatically handles multiple processes writing to the same log file safely.
 
 ## **6\. Usage**
 

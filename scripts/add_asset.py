@@ -19,11 +19,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from utils.db_utils import execute_query
-from utils.logging_config import setup_logging
+from utils.logging_config import setup_caretaker_logging
 import logging
 
 # Setup logging
-setup_logging("add_asset")
+setup_caretaker_logging("add_asset")
 logger = logging.getLogger(__name__)
 
 
