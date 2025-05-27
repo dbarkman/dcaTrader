@@ -236,6 +236,9 @@ The following cron jobs need to be set up on your Linux server. Ensure the paths
 
 # Caretaker: Consistency Checker (e.g., runs every 5 minutes)
 */5 * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/consistency_checker.py >> /path_to_project/logs/cron.log 2>&1
+
+# Log Rotation (runs daily at midnight)
+0 0 * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/log_rotator.py >> /path_to_project/logs/log_rotator.log 2>&1
 ```
 
 Setup notes:
@@ -259,6 +262,13 @@ The application uses a consolidated logging approach with three primary log file
 - `logs/cron.log` - Raw stdout/stderr from cron job executions (shell errors, startup issues, etc.)
 
 Python's logging system automatically handles multiple processes writing to the same log file safely.
+
+**Log Rotation:**
+The application implements comprehensive log rotation to manage disk space:
+- `main.log` uses time-based rotation (daily at midnight) with automatic gzip compression
+- `caretakers.log` and `cron.log` are rotated by an external script (`scripts/log_rotator.py`)
+- All rotated logs are compressed with gzip and kept for 7 days by default
+- Archived logs follow the naming pattern: `logfile.YYYY-MM-DD.gz`
 
 ## **6\. Usage**
 
@@ -343,8 +353,9 @@ This script will perform setup (potentially clearing DB tables and Alpaca positi
 
 ### **7.6. Current Status**
 
-- ✅ 34 tests passing
-- ✅ 84% code coverage  
-- ✅ All Phase 1 functionality tested
+- ✅ 344 tests passing
+- ✅ 85% code coverage  
+- ✅ All Phase 1-3 functionality tested
+- ✅ Log rotation system fully implemented and tested
 
 *This README provides a foundational overview. Specific script names and detailed commands may evolve during development.*

@@ -18,6 +18,8 @@ Features:
 import logging
 import logging.handlers
 import sys
+import gzip
+import shutil
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
@@ -28,6 +30,52 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import get_config
 
 config = get_config()
+
+
+class GzipTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
+    """
+    Custom TimedRotatingFileHandler that automatically gzips rotated log files.
+    
+    This handler extends the standard TimedRotatingFileHandler to compress
+    old log files with gzip, saving disk space for archived logs.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set up custom namer and rotator for gzipping
+        self.namer = self._gzip_namer
+        self.rotator = self._gzip_rotator
+    
+    def _gzip_namer(self, default_name: str) -> str:
+        """
+        Custom namer that adds .gz extension to rotated files.
+        
+        Args:
+            default_name: The default name that would be used
+            
+        Returns:
+            The name with .gz extension added
+        """
+        return default_name + ".gz"
+    
+    def _gzip_rotator(self, source: str, dest: str) -> None:
+        """
+        Custom rotator that gzips the rotated file.
+        
+        Args:
+            source: Path to the source file to be rotated
+            dest: Path to the destination (should end with .gz)
+        """
+        try:
+            with open(source, 'rb') as f_in:
+                with gzip.open(dest, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            # Remove the original uncompressed file
+            Path(source).unlink()
+        except Exception as e:
+            # If gzipping fails, fall back to regular rotation
+            shutil.move(source, dest.replace('.gz', ''))
+            print(f"Warning: Failed to gzip {source}: {e}")
 
 
 class AssetLifecycleFormatter(logging.Formatter):
@@ -265,7 +313,10 @@ def setup_main_app_logging(
     enable_asset_tracking: bool = True
 ) -> logging.Logger:
     """
-    Set up logging for the main WebSocket application.
+    Set up logging for the main WebSocket application with time-based rotation.
+    
+    This function sets up logging specifically for the main application with
+    daily log rotation and gzip compression for archived files.
     
     Args:
         console_level: Console logging level (defaults to config.log_level)
@@ -275,12 +326,86 @@ def setup_main_app_logging(
     Returns:
         Configured logger for main_app
     """
-    return setup_logging(
-        app_name="main_app",
-        console_level=console_level,
-        file_level=file_level,
-        enable_asset_tracking=enable_asset_tracking
+    # Get log levels from config or use provided values
+    console_level = console_level or config.log_level
+    file_level = file_level or config.log_level
+    
+    # Convert string levels to logging constants
+    console_level_int = getattr(logging, console_level.upper(), logging.INFO)
+    file_level_int = getattr(logging, file_level.upper(), logging.INFO)
+    
+    # Ensure logs directory exists
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create formatters
+    if enable_asset_tracking:
+        console_formatter = AssetLifecycleFormatter(include_asset_prefix=True)
+        file_formatter = AssetLifecycleFormatter(include_asset_prefix=True)
+    else:
+        # Standard formatters without asset tracking
+        console_format = '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+        console_formatter = logging.Formatter(console_format, datefmt='%Y-%m-%d %H:%M:%S')
+        file_formatter = logging.Formatter(console_format, datefmt='%Y-%m-%d %H:%M:%S')
+    
+    # During testing, use individual loggers instead of root logger to allow pytest capture
+    import sys
+    if 'pytest' in sys.modules:
+        # Use individual logger for pytest compatibility
+        logger = logging.getLogger("main_app")
+        logger.setLevel(logging.DEBUG)
+        logger.handlers.clear()
+        logger.propagate = True  # Allow pytest to capture logs
+    else:
+        # Use root logger for production
+        logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
+        logger.handlers.clear()
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(console_level_int)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    # Time-based rotating file handler for main.log with gzip compression
+    log_file = config.log_dir / "main.log"
+    file_handler = GzipTimedRotatingFileHandler(
+        log_file,
+        when='midnight',
+        interval=1,
+        backupCount=7,  # Keep 7 days of archives
+        encoding='utf-8'
     )
+    file_handler.setLevel(file_level_int)
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    
+    # Create a separate handler for asset lifecycle logs (also time-based)
+    if enable_asset_tracking:
+        asset_log_file = config.log_dir / "main_assets.log"
+        asset_handler = GzipTimedRotatingFileHandler(
+            asset_log_file,
+            when='midnight',
+            interval=1,
+            backupCount=7,
+            encoding='utf-8'
+        )
+        asset_handler.setLevel(file_level_int)
+        asset_handler.setFormatter(file_formatter)
+        
+        # Add a filter to only log messages with asset context
+        asset_handler.addFilter(lambda record: hasattr(record, 'asset_symbol'))
+        logger.addHandler(asset_handler)
+    
+    # Log the logging setup
+    setup_logger = logging.getLogger(__name__)
+    setup_logger.info("Logging configured for main_app with time-based rotation")
+    setup_logger.info(f"Console level: {console_level}, File level: {file_level}")
+    setup_logger.info(f"Log directory: {config.log_dir}")
+    setup_logger.info(f"Log file: main.log (rotated daily, 7 days retention, gzipped)")
+    setup_logger.info(f"Asset tracking: {'Enabled' if enable_asset_tracking else 'Disabled'}")
+    
+    return logger
 
 
 def setup_caretaker_logging(
