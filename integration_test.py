@@ -2200,8 +2200,8 @@ def test_phase6_take_profit_order_placement():
         INSERT INTO dca_assets (
             asset_symbol, is_enabled, base_order_amount, safety_order_amount,
             max_safety_orders, safety_order_deviation, take_profit_percent,
-            cooldown_period, buy_order_price_deviation_percent
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            cooldown_period, buy_order_price_deviation_percent, ttp_enabled, ttp_deviation_percent
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
         asset_data = (
@@ -2213,7 +2213,9 @@ def test_phase6_take_profit_order_placement():
             Decimal('2.5'),     # 2.5% deviation for safety orders
             Decimal('1.0'),     # 1.0% take-profit threshold <<<< KEY FOR PHASE 6
             300,                # 5 min cooldown
-            Decimal('2.0')      # 2% deviation for early restart
+            Decimal('2.0'),     # 2% deviation for early restart
+            False,              # ttp_enabled = False (test standard take-profit)
+            None                # ttp_deviation_percent = None (not used when TTP disabled)
         )
         
         result = execute_query(insert_asset_query, asset_data, commit=True)
@@ -2232,8 +2234,8 @@ def test_phase6_take_profit_order_placement():
         insert_cycle_query = """
         INSERT INTO dca_cycles (
             asset_id, status, quantity, average_purchase_price, 
-            safety_orders, latest_order_id, last_order_fill_price
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            safety_orders, latest_order_id, last_order_fill_price, highest_trailing_price, sell_price
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         
         cycle_data = (
@@ -2243,7 +2245,9 @@ def test_phase6_take_profit_order_placement():
             Decimal('3800.0'),             # average purchase price $3,800
             1,                             # 1 safety order filled
             f'test_last_order_{timestamp}',
-            Decimal('3750.0')              # last order filled at $3,750
+            Decimal('3750.0'),             # last order filled at $3,750
+            None,                          # highest_trailing_price = None (not trailing yet)
+            None                           # sell_price = None (not sold yet)
         )
         
         result = execute_query(insert_cycle_query, cycle_data, commit=True)
