@@ -243,7 +243,7 @@ async def test_on_trade_update_handler_with_execution(caplog):
     # Call the handler
     await on_trade_update(mock_trade_update)
     
-    # Verify the enhanced log messages were created (should be 15 total with partial fill handling)
+    # Verify the enhanced log messages were created (should be 20 total with partial fill handling)
     # 1. Trade Update header
     # 2. Order ID
     # 3. Side | Type
@@ -256,10 +256,15 @@ async def test_on_trade_update_handler_with_execution(caplog):
     # 10. Fill Quantity
     # 11. Fill Value
     # 12. PARTIAL FILL header (new enhancement)
-    # 13. Filled Qty (new enhancement)
-    # 14. Filled Avg Price (new enhancement)
-    # 15. No database updates message (new enhancement)
-    assert len(caplog.records) == 15
+    # 13. Side (new enhancement)
+    # 14. Partially Filled Qty (new enhancement)
+    # 15. Avg Fill Price (new enhancement)
+    # 16. Order Status (new enhancement)
+    # 17. Order remains active (new enhancement)
+    # 18. Remaining Qty (new enhancement)
+    # 19. No database updates message (new enhancement)
+    # 20. Waiting for terminal event (new enhancement)
+    assert len(caplog.records) == 20
     
     # Check key log messages
     log_messages = [record.message for record in caplog.records]

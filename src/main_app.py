@@ -885,12 +885,39 @@ async def on_trade_update(trade_update):
     
     # Enhanced logic for different event types
     if event == 'partial_fill':
-        # NEW: Only log partial fills, no database updates
+        # STANDARDIZED: Only log partial fills, no database updates
         logger.info(f"📊 PARTIAL FILL: {order.symbol} order {order.id}")
-        if hasattr(order, 'filled_qty') and hasattr(order, 'filled_avg_price'):
-            logger.info(f"   Filled Qty: {order.filled_qty}")
-            logger.info(f"   Filled Avg Price: ${order.filled_avg_price}")
-        logger.info("   ℹ️ No database updates for partial fills - waiting for final fill or cancellation")
+        logger.info(f"   Side: {order.side.upper()}")
+        
+        # Log detailed partial fill information
+        if hasattr(order, 'filled_qty') and order.filled_qty:
+            logger.info(f"   Partially Filled Qty: {order.filled_qty}")
+        
+        if hasattr(order, 'filled_avg_price') and order.filled_avg_price:
+            try:
+                avg_price_float = float(order.filled_avg_price)
+                logger.info(f"   Avg Fill Price: {format_price(avg_price_float)}")
+            except (ValueError, TypeError):
+                logger.info(f"   Avg Fill Price: {order.filled_avg_price}")
+        
+        # Log order status if available
+        if hasattr(order, 'status') and order.status:
+            logger.info(f"   Order Status: {order.status.upper()}")
+            if order.status.lower() == 'partially_filled':
+                logger.info(f"   📋 Order remains active with partial fill")
+        
+        # Log remaining quantity if available
+        if hasattr(order, 'qty') and hasattr(order, 'filled_qty'):
+            try:
+                total_qty = float(order.qty)
+                filled_qty = float(order.filled_qty)
+                remaining_qty = total_qty - filled_qty
+                logger.info(f"   Remaining Qty: {remaining_qty} (of {total_qty} total)")
+            except (ValueError, TypeError):
+                logger.info(f"   Total Qty: {order.qty}, Filled Qty: {order.filled_qty}")
+        
+        logger.info("   ℹ️ PARTIAL FILL: No database updates - cycle remains in current status")
+        logger.info("   ⏳ Waiting for terminal event (fill/canceled) to update cycle financials")
         
     elif event == 'fill':
         logger.info(f"🎯 ORDER FILLED SUCCESSFULLY for {order.symbol}!")
@@ -961,14 +988,18 @@ async def update_cycle_on_buy_fill(order, trade_update):
             logger.error(f"❌ Symbol mismatch: cycle asset={asset_result['asset_symbol']}, order symbol={symbol}")
             return
         
-        # Step 3: Extract fill details using Phase 7 specifications
+        # Step 3: Extract TERMINAL fill details (order is now completely filled)
+        # For terminal 'fill' events, use order.filled_avg_price as the definitive last_order_fill_price
         filled_qty = None
         avg_fill_price = None
         
-        # Use order.filled_qty and order.filled_avg_price as per Phase 7 specs
+        logger.info(f"📊 Processing TERMINAL FILL event - extracting definitive order data...")
+        
+        # Use order.filled_qty and order.filled_avg_price as definitive source for terminal fills
         if hasattr(order, 'filled_qty') and order.filled_qty:
             try:
                 filled_qty = Decimal(str(order.filled_qty))
+                logger.info(f"   Total Filled Qty: {filled_qty}")
             except (ValueError, TypeError, decimal.InvalidOperation):
                 logger.error(f"❌ Cannot parse filled_qty from order: {order.filled_qty}")
                 return
@@ -976,6 +1007,7 @@ async def update_cycle_on_buy_fill(order, trade_update):
         if hasattr(order, 'filled_avg_price') and order.filled_avg_price:
             try:
                 avg_fill_price = Decimal(str(order.filled_avg_price))
+                logger.info(f"   Avg Fill Price: {format_price(avg_fill_price)} (definitive)")
             except (ValueError, TypeError, decimal.InvalidOperation):
                 logger.error(f"❌ Cannot parse filled_avg_price from order: {order.filled_avg_price}")
                 return
@@ -984,24 +1016,24 @@ async def update_cycle_on_buy_fill(order, trade_update):
         if filled_qty is None and hasattr(trade_update, 'qty') and trade_update.qty:
             try:
                 filled_qty = Decimal(str(trade_update.qty))
-                logger.info(f"Using trade_update qty as fallback: {filled_qty}")
+                logger.info(f"   Using trade_update qty as fallback: {filled_qty}")
             except (ValueError, TypeError, decimal.InvalidOperation):
                 logger.warning(f"Could not parse qty from trade_update: {trade_update.qty}")
         
         if avg_fill_price is None and hasattr(trade_update, 'price') and trade_update.price:
             try:
                 avg_fill_price = Decimal(str(trade_update.price))
-                logger.info(f"Using trade_update price as fallback: ${avg_fill_price}")
+                logger.info(f"   Using trade_update price as fallback: ${avg_fill_price}")
             except (ValueError, TypeError, decimal.InvalidOperation):
                 logger.warning(f"Could not parse price from trade_update: {trade_update.price}")
         
         # Final validation
         if filled_qty is None or avg_fill_price is None:
-            logger.error(f"❌ Cannot update cycle: Missing fill data (filled_qty={filled_qty}, avg_fill_price={avg_fill_price})")
+            logger.error(f"❌ Cannot update cycle: Missing terminal fill data (filled_qty={filled_qty}, avg_fill_price={avg_fill_price})")
             return
         
         if filled_qty <= 0 or avg_fill_price <= 0:
-            logger.error(f"❌ Invalid fill data: filled_qty={filled_qty}, avg_fill_price={avg_fill_price}")
+            logger.error(f"❌ Invalid terminal fill data: filled_qty={filled_qty}, avg_fill_price={avg_fill_price}")
             return
         
         # Step 4: Get Alpaca TradingClient and fetch current position (NEW ENHANCEMENT)
@@ -1401,21 +1433,28 @@ async def update_cycle_on_order_cancellation(order, event):
             if client:
                 alpaca_position = get_alpaca_position_by_symbol(client, symbol)
             
-            # Extract partial fill details if available
+            # Extract partial fill details if available (STANDARDIZED)
             order_filled_qty = Decimal('0')
             order_filled_avg_price = None
+            
+            logger.info(f"📊 Checking for partial fills in {event} BUY order...")
             
             if hasattr(order, 'filled_qty') and order.filled_qty:
                 try:
                     order_filled_qty = Decimal(str(order.filled_qty))
+                    if order_filled_qty > 0:
+                        logger.info(f"   Partial Fill Detected: {order_filled_qty} filled")
+                    else:
+                        logger.info(f"   No Partial Fills: Order was {event} without any fills")
                 except (ValueError, TypeError, decimal.InvalidOperation):
-                    logger.warning(f"Could not parse filled_qty from canceled order: {order.filled_qty}")
+                    logger.warning(f"Could not parse filled_qty from {event} order: {order.filled_qty}")
             
             if hasattr(order, 'filled_avg_price') and order.filled_avg_price and order_filled_qty > 0:
                 try:
                     order_filled_avg_price = Decimal(str(order.filled_avg_price))
+                    logger.info(f"   Partial Fill Avg Price: {format_price(order_filled_avg_price)} (definitive)")
                 except (ValueError, TypeError, decimal.InvalidOperation):
-                    logger.warning(f"Could not parse filled_avg_price from canceled order: {order.filled_avg_price}")
+                    logger.warning(f"Could not parse filled_avg_price from {event} order: {order.filled_avg_price}")
             
             # Prepare updates with Alpaca position sync
             updates = {
@@ -1489,21 +1528,28 @@ async def update_cycle_on_order_cancellation(order, event):
                 logger.warning(f"⚠️ Could not get Alpaca client for position sync after SELL {event}")
                 current_quantity_on_alpaca = None
             
-            # Extract partial fill details if available
+            # Extract partial fill details if available (STANDARDIZED)
             order_filled_qty = Decimal('0')
             order_filled_avg_price = None
+            
+            logger.info(f"📊 Checking for partial fills in {event} SELL order...")
             
             if hasattr(order, 'filled_qty') and order.filled_qty:
                 try:
                     order_filled_qty = Decimal(str(order.filled_qty))
+                    if order_filled_qty > 0:
+                        logger.info(f"   Partial Fill Detected: {order_filled_qty} sold")
+                    else:
+                        logger.info(f"   No Partial Fills: SELL order was {event} without any fills")
                 except (ValueError, TypeError, decimal.InvalidOperation):
-                    logger.warning(f"Could not parse filled_qty from canceled SELL order: {order.filled_qty}")
+                    logger.warning(f"Could not parse filled_qty from {event} SELL order: {order.filled_qty}")
             
             if hasattr(order, 'filled_avg_price') and order.filled_avg_price and order_filled_qty > 0:
                 try:
                     order_filled_avg_price = Decimal(str(order.filled_avg_price))
+                    logger.info(f"   Partial Fill Avg Price: {format_price(order_filled_avg_price)} (definitive)")
                 except (ValueError, TypeError, decimal.InvalidOperation):
-                    logger.warning(f"Could not parse filled_avg_price from canceled SELL order: {order.filled_avg_price}")
+                    logger.warning(f"Could not parse filled_avg_price from {event} SELL order: {order.filled_avg_price}")
             
             # Prepare base updates (always clear order tracking fields)
             updates = {

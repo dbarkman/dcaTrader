@@ -5254,6 +5254,329 @@ def run_phase14_test():
     return asyncio.run(test_phase14_ttp_integration())
 
 
+async def test_phase15_partial_fill_handling():
+    """
+    Phase 15: Standardized Partial Fill Handling Integration Test
+    
+    Tests the refined partial fill handling logic:
+    1. partial_fill events only log without updating cycle financials
+    2. Terminal fill/canceled events update cycle financials with definitive data
+    3. Proper handling of partial fills in canceled orders
+    """
+    print("\n" + "="*60)
+    print("PHASE 15 INTEGRATION TEST: Standardized Partial Fill Handling")
+    print("="*60)
+    
+    test_asset_id = None
+    test_cycle_id = None
+    test_asset_symbol = 'ETH/USD'
+    
+    try:
+        # Step 1: Create test asset configuration
+        print("\n1. Creating test asset configuration...")
+        timestamp = int(time.time())
+        
+        insert_asset_query = """
+        INSERT INTO dca_assets (
+            asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+            max_safety_orders, safety_order_deviation, take_profit_percent,
+            cooldown_period, buy_order_price_deviation_percent,
+            ttp_enabled, ttp_deviation_percent
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        asset_data = (
+            test_asset_symbol,  # 'ETH/USD'
+            True,               # enabled
+            Decimal('100.00'),  # base order $100
+            Decimal('150.00'),  # safety order $150
+            3,                  # max 3 safety orders
+            Decimal('2.5'),     # 2.5% deviation for safety orders
+            Decimal('1.0'),     # 1.0% take-profit threshold
+            300,                # 5 min cooldown
+            Decimal('2.0'),     # 2% deviation for early restart
+            False,              # TTP disabled for this test
+            None                # No TTP deviation
+        )
+        
+        test_asset_id = execute_query(insert_asset_query, asset_data, return_id=True)
+        if not test_asset_id:
+            print("❌ FAILED: Could not create test asset")
+            return False
+        
+        print(f"✅ Test asset created with ID: {test_asset_id}")
+        
+        # Step 2: Create test cycle in 'buying' status
+        print("\n2. Creating test cycle in 'buying' status...")
+        
+        insert_cycle_query = """
+        INSERT INTO dca_cycles (
+            asset_id, status, quantity, average_purchase_price, 
+            safety_orders, latest_order_id, last_order_fill_price, highest_trailing_price
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        cycle_data = (
+            test_asset_id,
+            'buying',                      # status = buying (active order)
+            Decimal('0'),                  # no position yet
+            Decimal('0'),                  # no average price yet
+            0,                             # no safety orders yet
+            f'test_partial_order_{timestamp}',  # mock order ID
+            None,                          # no last fill price yet
+            None                           # no trailing price
+        )
+        
+        test_cycle_id = execute_query(insert_cycle_query, cycle_data, return_id=True)
+        if not test_cycle_id:
+            print("❌ FAILED: Could not create test cycle")
+            return False
+        
+        print(f"✅ Test cycle created with ID: {test_cycle_id}")
+        print(f"   Status: buying | Latest Order ID: test_partial_order_{timestamp}")
+        
+        # Step 3: Test partial_fill event handling
+        print("\n3. TESTING: Simulating partial_fill event...")
+        
+        # Import the main_app module for testing
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+        from main_app import on_trade_update
+        
+        # Create mock partial fill trade update
+        class MockPartialFillOrder:
+            def __init__(self):
+                self.symbol = test_asset_symbol
+                self.id = f'test_partial_order_{timestamp}'
+                self.side = 'buy'
+                self.status = 'partially_filled'
+                self.qty = '0.05'
+                self.filled_qty = '0.02'
+                self.filled_avg_price = '3750.0'
+        
+        class MockPartialFillTradeUpdate:
+            def __init__(self):
+                self.event = 'partial_fill'
+                self.order = MockPartialFillOrder()
+        
+        mock_partial_fill = MockPartialFillTradeUpdate()
+        
+        # Capture logs to verify partial fill handling
+        import logging
+        import io
+        log_capture = io.StringIO()
+        handler = logging.StreamHandler(log_capture)
+        logger = logging.getLogger('main_app')
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        
+        print(f"   Simulating partial_fill for order: {mock_partial_fill.order.id}")
+        print(f"   Filled: {mock_partial_fill.order.filled_qty} of {mock_partial_fill.order.qty} ETH")
+        print(f"   Avg Price: ${mock_partial_fill.order.filled_avg_price}")
+        
+        # Process partial fill
+        await on_trade_update(mock_partial_fill)
+        
+        # Verify cycle remains unchanged after partial fill
+        cycle_check_query = """
+        SELECT status, quantity, average_purchase_price, safety_orders, last_order_fill_price
+        FROM dca_cycles WHERE id = %s
+        """
+        
+        cycle_after_partial = execute_query(cycle_check_query, (test_cycle_id,), fetch_one=True)
+        
+        if (cycle_after_partial['status'] == 'buying' and 
+            cycle_after_partial['quantity'] == Decimal('0') and
+            cycle_after_partial['average_purchase_price'] == Decimal('0') and
+            cycle_after_partial['safety_orders'] == 0 and
+            cycle_after_partial['last_order_fill_price'] is None):
+            print("✅ PARTIAL FILL: Cycle financials unchanged (correct behavior)")
+        else:
+            print("❌ FAILED: Partial fill incorrectly updated cycle financials")
+            print(f"   Status: {cycle_after_partial['status']}")
+            print(f"   Quantity: {cycle_after_partial['quantity']}")
+            print(f"   Avg Price: {cycle_after_partial['average_purchase_price']}")
+            return False
+        
+        # Verify logging occurred
+        log_output = log_capture.getvalue()
+        if "PARTIAL FILL:" in log_output and "No database updates" in log_output:
+            print("✅ PARTIAL FILL: Proper logging without database updates")
+        else:
+            print("❌ FAILED: Partial fill logging not as expected")
+            print(f"Log output: {log_output}")
+            return False
+        
+        # Step 4: Test terminal fill event handling
+        print("\n4. TESTING: Simulating terminal fill event...")
+        
+        # Create mock terminal fill trade update
+        class MockTerminalFillOrder:
+            def __init__(self):
+                self.symbol = test_asset_symbol
+                self.id = f'test_partial_order_{timestamp}'
+                self.side = 'buy'
+                self.status = 'filled'
+                self.qty = '0.05'
+                self.filled_qty = '0.05'  # Fully filled now
+                self.filled_avg_price = '3760.0'  # Final average price
+        
+        class MockTerminalFillTradeUpdate:
+            def __init__(self):
+                self.event = 'fill'
+                self.order = MockTerminalFillOrder()
+        
+        mock_terminal_fill = MockTerminalFillTradeUpdate()
+        
+        print(f"   Simulating terminal fill for order: {mock_terminal_fill.order.id}")
+        print(f"   Total Filled: {mock_terminal_fill.order.filled_qty} ETH")
+        print(f"   Final Avg Price: ${mock_terminal_fill.order.filled_avg_price}")
+        
+        # Mock Alpaca position for terminal fill
+        with patch('main_app.get_trading_client') as mock_get_client:
+            with patch('main_app.get_alpaca_position_by_symbol') as mock_get_position:
+                # Setup mock position
+                mock_position = Mock()
+                mock_position.qty = '0.05'
+                mock_position.avg_entry_price = '3760.0'
+                
+                mock_get_position.return_value = mock_position
+                mock_get_client.return_value = Mock()
+                
+                # Process terminal fill
+                await on_trade_update(mock_terminal_fill)
+        
+        # Verify cycle was updated after terminal fill
+        cycle_after_terminal = execute_query(cycle_check_query, (test_cycle_id,), fetch_one=True)
+        
+        if (cycle_after_terminal['status'] == 'watching' and 
+            cycle_after_terminal['quantity'] == Decimal('0.05') and
+            cycle_after_terminal['average_purchase_price'] == Decimal('3760.0') and
+            cycle_after_terminal['last_order_fill_price'] == Decimal('3760.0')):
+            print("✅ TERMINAL FILL: Cycle financials updated correctly")
+        else:
+            print("❌ FAILED: Terminal fill did not update cycle correctly")
+            print(f"   Status: {cycle_after_terminal['status']}")
+            print(f"   Quantity: {cycle_after_terminal['quantity']}")
+            print(f"   Avg Price: {cycle_after_terminal['average_purchase_price']}")
+            print(f"   Last Fill Price: {cycle_after_terminal['last_order_fill_price']}")
+            return False
+        
+        # Step 5: Test partial fill in canceled order
+        print("\n5. TESTING: Simulating canceled order with partial fill...")
+        
+        # Create new cycle for cancellation test
+        cycle_data_cancel = (
+            test_asset_id,
+            'buying',                      # status = buying (active order)
+            Decimal('0.05'),               # has existing position
+            Decimal('3760.0'),             # existing average price
+            0,                             # no safety orders yet
+            f'test_cancel_order_{timestamp}',  # new mock order ID
+            Decimal('3760.0'),             # last fill price
+            None                           # no trailing price
+        )
+        
+        test_cycle_cancel_id = execute_query(insert_cycle_query, cycle_data_cancel, return_id=True)
+        
+        # Create mock canceled order with partial fill
+        class MockCanceledOrder:
+            def __init__(self):
+                self.symbol = test_asset_symbol
+                self.id = f'test_cancel_order_{timestamp}'
+                self.side = 'buy'
+                self.status = 'canceled'
+                self.qty = '0.03'
+                self.filled_qty = '0.01'  # Partially filled before cancellation
+                self.filled_avg_price = '3700.0'
+        
+        print(f"   Simulating canceled order: {f'test_cancel_order_{timestamp}'}")
+        print(f"   Partial Fill: {0.01} ETH @ ${3700.0}")
+        
+        # Mock Alpaca position for cancellation (reflects partial fill)
+        with patch('main_app.get_trading_client') as mock_get_client:
+            with patch('main_app.get_alpaca_position_by_symbol') as mock_get_position:
+                with patch('main_app.execute_query') as mock_execute_query:
+                    # Setup mock cycle data for cancellation handler
+                    mock_cycle_data = {
+                        'id': test_cycle_cancel_id,
+                        'asset_id': test_asset_id,
+                        'status': 'buying',
+                        'quantity': Decimal('0.05'),
+                        'average_purchase_price': Decimal('3760.0'),
+                        'safety_orders': 0,
+                        'latest_order_id': f'test_cancel_order_{timestamp}',
+                        'latest_order_created_at': datetime.now(timezone.utc),
+                        'last_order_fill_price': Decimal('3760.0'),
+                        'highest_trailing_price': None,
+                        'completed_at': None,
+                        'created_at': datetime.now(timezone.utc),
+                        'updated_at': datetime.now(timezone.utc),
+                        'sell_price': None
+                    }
+                    
+                    # Setup mock position (reflects additional partial fill)
+                    mock_position = Mock()
+                    mock_position.qty = '0.06'  # Original 0.05 + 0.01 partial fill
+                    mock_position.avg_entry_price = '3750.0'  # Weighted average
+                    
+                    mock_execute_query.return_value = mock_cycle_data
+                    mock_get_position.return_value = mock_position
+                    mock_get_client.return_value = Mock()
+                    
+                    # Import and test cancellation handler
+                    from main_app import update_cycle_on_order_cancellation
+                    
+                    with patch('main_app.update_cycle') as mock_update_cycle:
+                        mock_update_cycle.return_value = True
+                        
+                        # Process cancellation
+                        await update_cycle_on_order_cancellation(MockCanceledOrder(), 'canceled')
+                        
+                        # Verify update_cycle was called with correct data
+                        mock_update_cycle.assert_called_once()
+                        call_args = mock_update_cycle.call_args[0]
+                        updates = call_args[1]
+                        
+                        if (updates['status'] == 'watching' and
+                            updates['quantity'] == Decimal('0.06') and
+                            updates['average_purchase_price'] == Decimal('3750.0') and
+                            updates['last_order_fill_price'] == Decimal('3700.0')):
+                            print("✅ CANCELED ORDER: Partial fill handled correctly")
+                        else:
+                            print("❌ FAILED: Canceled order partial fill not handled correctly")
+                            print(f"   Updates: {updates}")
+                            return False
+        
+        print("\n✅ Phase 15: ✅ PASSED")
+        print("   • Partial fills log without database updates")
+        print("   • Terminal fills update cycle with definitive data")
+        print("   • Canceled orders with partial fills handled correctly")
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ Phase 15: ❌ FAILED")
+        print(f"Error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+        
+    finally:
+        # Cleanup
+        print("\n🧹 TEARDOWN: Cleaning up test resources...")
+        if test_cycle_id:
+            cleanup_test_database_records(cycle_ids=[test_cycle_id])
+            print(f"   ✅ Deleted test cycle {test_cycle_id}")
+        if test_asset_id:
+            cleanup_test_database_records(asset_ids=[test_asset_id])
+            print(f"   ✅ Deleted test asset {test_asset_id}")
+        print("   ✅ Teardown completed")
+
+
+def run_phase15_test():
+    """Run Phase 15 partial fill handling integration test."""
+    return asyncio.run(test_phase15_partial_fill_handling())
+
+
 def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
@@ -5435,6 +5758,15 @@ def main():
                 print("\n🎉 Phase 14: ✅ PASSED")
             else:
                 print("\n❌ Phase 14: ❌ FAILED")
+                sys.exit(1)
+            return
+        elif phase_arg == 'phase15':
+            print("\n🎯 Running ONLY Phase 15 tests...")
+            phase15_success = run_phase15_test()
+            if phase15_success:
+                print("\n🎉 Phase 15: ✅ PASSED")
+            else:
+                print("\n❌ Phase 15: ❌ FAILED")
                 sys.exit(1)
             return
         elif phase_arg == 'simulated':
