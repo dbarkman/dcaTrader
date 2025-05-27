@@ -56,12 +56,25 @@ from main_app import (
     check_and_place_take_profit_order
 )
 
-# Configure logging
+# Configure logging to output to both console and logs/test.log
+from pathlib import Path
+
+# Ensure logs directory exists
+logs_dir = Path('logs')
+logs_dir.mkdir(exist_ok=True)
+
+# Set up logging configuration
+log_file = logs_dir / 'test.log'
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file, mode='a'),  # Append to test.log
+        logging.StreamHandler(sys.stdout)         # Also output to console
+    ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('integration_test')
 
 
 
@@ -5581,6 +5594,12 @@ def main():
     """Main integration test runner."""
     print("DCA Trading Bot - Integration Test Suite")
     print(f"Started at: {datetime.now()}")
+    
+    # Log the start of integration tests
+    logger.info("="*60)
+    logger.info("🧪 Integration Test Suite Started")
+    logger.info(f"Started at: {datetime.now()}")
+    logger.info("="*60)
     
     # Parse command line arguments for --yes flag
     auto_confirm = False

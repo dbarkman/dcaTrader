@@ -7,7 +7,34 @@ Provides convenient commands for running different types of tests.
 import sys
 import subprocess
 import os
+import logging
 from pathlib import Path
+
+def setup_test_logging():
+    """Set up logging to output to logs/test.log file."""
+    # Ensure logs directory exists
+    logs_dir = Path('logs')
+    logs_dir.mkdir(exist_ok=True)
+    
+    # Configure logging
+    log_file = logs_dir / 'test.log'
+    
+    # Set up logging configuration
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, mode='a'),  # Append to test.log
+            logging.StreamHandler(sys.stdout)         # Also output to console
+        ]
+    )
+    
+    logger = logging.getLogger('run_tests')
+    logger.info("="*60)
+    logger.info("🧪 Test Runner Started")
+    logger.info("="*60)
+    
+    return logger
 
 def load_test_environment():
     """Load test environment variables from .env.test file."""
@@ -56,10 +83,29 @@ def load_test_environment():
     print(f"   • Alpaca: {os.environ.get('APCA_API_BASE_URL')}")
     print(f"   • Database: {os.environ.get('DB_NAME')} on {os.environ.get('DB_HOST')}")
 
-def run_command(cmd):
+def run_command(cmd, logger):
     """Run a command and return the exit code."""
-    print(f"Running: {' '.join(cmd)}")
-    return subprocess.run(cmd, env=os.environ).returncode
+    cmd_str = ' '.join(cmd)
+    print(f"Running: {cmd_str}")
+    logger.info(f"Executing command: {cmd_str}")
+    
+    result = subprocess.run(cmd, env=os.environ, capture_output=True, text=True)
+    
+    # Log the output
+    if result.stdout:
+        logger.info(f"STDOUT:\n{result.stdout}")
+    if result.stderr:
+        logger.error(f"STDERR:\n{result.stderr}")
+    
+    logger.info(f"Command completed with exit code: {result.returncode}")
+    
+    # Still print to console for real-time feedback
+    if result.stdout:
+        print(result.stdout, end='')
+    if result.stderr:
+        print(result.stderr, end='', file=sys.stderr)
+    
+    return result.returncode
 
 def main():
     """Main test runner function."""
@@ -75,19 +121,23 @@ def main():
         print("  verbose      - Run tests with verbose output")
         return 1
 
+    # Set up test logging
+    logger = setup_test_logging()
+    
     # Load test environment before running any tests
     load_test_environment()
-
-    command = sys.argv[1].lower()
     
+    command = sys.argv[1].lower()
+    logger.info(f"Running command: {command}")
+
     # Base pytest command
     base_cmd = [sys.executable, "-m", "pytest", "tests/"]
     
     if command == "all":
-        return run_command(base_cmd + ["-v"])
+        return run_command(base_cmd + ["-v"], logger)
     
     elif command == "unit":
-        return run_command(base_cmd + ["-v", "-m", "unit"])
+        return run_command(base_cmd + ["-v", "-m", "unit"], logger)
     
     elif command == "coverage":
         return run_command(base_cmd + [
@@ -95,30 +145,37 @@ def main():
             "--cov-report=term-missing",
             "--cov-report=html",
             "-v"
-        ])
+        ], logger)
     
     elif command == "html":
         exit_code = run_command(base_cmd + [
             "--cov=src", 
             "--cov-report=html",
             "-v"
-        ])
+        ], logger)
         if exit_code == 0:
             print("\nHTML coverage report generated in htmlcov/index.html")
+            logger.info("HTML coverage report generated in htmlcov/index.html")
         return exit_code
     
     elif command == "integration":
-        return run_command(base_cmd + ["-v", "-m", "integration"])
+        return run_command(base_cmd + ["-v", "-m", "integration"], logger)
     
     elif command == "fast":
-        return run_command(base_cmd + ["-v", "--tb=short"])
+        return run_command(base_cmd + ["-v", "--tb=short"], logger)
     
     elif command == "verbose":
-        return run_command(base_cmd + ["-vv", "--tb=long"])
+        return run_command(base_cmd + ["-vv", "--tb=long"], logger)
     
     else:
         print(f"Unknown command: {command}")
+        logger.error(f"Unknown command: {command}")
         return 1
 
 if __name__ == "__main__":
-    sys.exit(main()) 
+    exit_code = main()
+    if exit_code == 0:
+        logging.getLogger('run_tests').info("🎉 Test runner completed successfully")
+    else:
+        logging.getLogger('run_tests').error(f"❌ Test runner failed with exit code {exit_code}")
+    sys.exit(exit_code) 
