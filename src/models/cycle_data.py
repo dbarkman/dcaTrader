@@ -37,6 +37,7 @@ class DcaCycle:
     created_at: datetime
     updated_at: datetime
     sell_price: Optional[Decimal] = None
+    asset_symbol: Optional[str] = None  # Added for caretaker scripts
 
     @classmethod
     def from_dict(cls, data: dict) -> 'DcaCycle':
@@ -63,7 +64,8 @@ class DcaCycle:
             completed_at=data['completed_at'],
             created_at=data['created_at'],
             updated_at=data['updated_at'],
-            sell_price=Decimal(str(data['sell_price'])) if data.get('sell_price') is not None else None
+            sell_price=Decimal(str(data['sell_price'])) if data.get('sell_price') is not None else None,
+            asset_symbol=data.get('asset_symbol')  # Include asset_symbol if available
         )
 
 
@@ -249,7 +251,7 @@ def update_cycle(cycle_id: int, updates: dict) -> bool:
 
 def get_cycle_by_id(cycle_id: int) -> Optional[DcaCycle]:
     """
-    Fetches a cycle by its ID.
+    Fetches a specific cycle by its ID.
     
     Args:
         cycle_id: The cycle ID to fetch
@@ -275,7 +277,7 @@ def get_cycle_by_id(cycle_id: int) -> Optional[DcaCycle]:
             logger.debug(f"Found cycle {cycle_id}")
             return DcaCycle.from_dict(result)
         else:
-            logger.debug(f"No cycle found with ID {cycle_id}")
+            logger.debug(f"Cycle {cycle_id} not found")
             return None
             
     except Error as e:
@@ -283,4 +285,43 @@ def get_cycle_by_id(cycle_id: int) -> Optional[DcaCycle]:
         raise
     except Exception as e:
         logger.error(f"Unexpected error fetching cycle {cycle_id}: {e}")
+        raise
+
+
+def get_all_cycles() -> list[DcaCycle]:
+    """
+    Fetches all cycles from the database with asset symbol information.
+    
+    Returns:
+        list[DcaCycle]: List of all cycles (empty list if none found)
+        
+    Raises:
+        mysql.connector.Error: If database query fails
+    """
+    try:
+        query = """
+        SELECT c.id, c.asset_id, c.status, c.quantity, c.average_purchase_price,
+               c.safety_orders, c.latest_order_id, c.latest_order_created_at, c.last_order_fill_price,
+               c.highest_trailing_price, c.completed_at, c.created_at, c.updated_at, c.sell_price,
+               a.asset_symbol
+        FROM dca_cycles c
+        LEFT JOIN dca_assets a ON c.asset_id = a.id
+        ORDER BY c.id DESC
+        """
+        
+        results = execute_query(query, fetch_all=True)
+        
+        if results:
+            cycles = [DcaCycle.from_dict(row) for row in results]
+            logger.debug(f"Found {len(cycles)} cycles")
+            return cycles
+        else:
+            logger.debug("No cycles found")
+            return []
+            
+    except Error as e:
+        logger.error(f"Error fetching all cycles: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error fetching all cycles: {e}")
         raise 

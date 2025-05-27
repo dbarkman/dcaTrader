@@ -21,6 +21,7 @@ from alpaca.data.historical import CryptoHistoricalDataClient
 from alpaca.data.requests import CryptoLatestTradeRequest, CryptoLatestQuoteRequest
 from alpaca.trading.models import TradeAccount, Order
 from alpaca.trading.models import Position
+from alpaca.common.exceptions import APIError
 
 # Load environment variables
 load_dotenv()
@@ -71,8 +72,11 @@ def get_account_info(client: TradingClient) -> Optional[TradeAccount]:
         account = client.get_account()
         logger.info(f"Account retrieved: {account.account_number}")
         return account
+    except APIError as e:
+        logger.error(f"Alpaca API error fetching account info: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Error fetching account info: {e}")
+        logger.error(f"Unexpected error fetching account info: {e}")
         return None
 
 
@@ -167,8 +171,11 @@ def get_latest_crypto_price(
             logger.warning(f"No trade data found for symbol: {symbol}")
             return None
             
+    except APIError as e:
+        logger.error(f"Alpaca API error fetching latest crypto price for {symbol}: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Error fetching latest crypto price for {symbol}: {e}")
+        logger.error(f"Unexpected error fetching latest crypto price for {symbol}: {e}")
         return None
 
 
@@ -223,8 +230,11 @@ def get_latest_crypto_quote(
             logger.warning(f"No quote data found for symbol: {symbol}")
             return None
             
+    except APIError as e:
+        logger.error(f"Alpaca API error fetching latest crypto quote for {symbol}: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Error fetching latest crypto quote for {symbol}: {e}")
+        logger.error(f"Unexpected error fetching latest crypto quote for {symbol}: {e}")
         return None
 
 
@@ -291,8 +301,11 @@ def place_limit_buy_order(
         logger.info(f"Limit BUY order placed: {order.id} for {qty} {symbol} @ ${limit_price}")
         return order
         
+    except APIError as e:
+        logger.error(f"Alpaca API error placing limit buy order for {symbol}: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Error placing limit buy order for {symbol}: {e}")
+        logger.error(f"Unexpected error placing limit buy order for {symbol}: {e}")
         return None
 
 
@@ -352,8 +365,12 @@ def place_market_sell_order(
         logger.info(f"Market SELL order placed: {order.id} for {qty} {symbol}")
         return order
         
+    except APIError as e:
+        logger.error(f"Alpaca API error placing market sell order for {symbol}: {e}")
+        logger.error(f"Order details: qty={qty}, symbol={symbol}, time_in_force={time_in_force}")
+        return None
     except Exception as e:
-        logger.error(f"Error placing market sell order for {symbol}: {e}")
+        logger.error(f"Unexpected error placing market sell order for {symbol}: {e}")
         logger.error(f"Order details: qty={qty}, symbol={symbol}, time_in_force={time_in_force}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
@@ -374,8 +391,11 @@ def get_open_orders(client: TradingClient) -> list[Order]:
         orders = client.get_orders()
         logger.info(f"Retrieved {len(orders)} open orders")
         return orders
+    except APIError as e:
+        logger.error(f"Alpaca API error fetching open orders: {e}")
+        return []
     except Exception as e:
-        logger.error(f"Error fetching open orders: {e}")
+        logger.error(f"Unexpected error fetching open orders: {e}")
         return []
 
 
@@ -394,8 +414,11 @@ def get_order(client: TradingClient, order_id: str) -> Optional[Order]:
         order = client.get_order_by_id(order_id)
         logger.debug(f"Retrieved order {order_id}: {order.status}")
         return order
+    except APIError as e:
+        logger.error(f"Alpaca API error fetching order {order_id}: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Error fetching order {order_id}: {e}")
+        logger.error(f"Unexpected error fetching order {order_id}: {e}")
         return None
 
 
@@ -414,8 +437,11 @@ def cancel_order(client: TradingClient, order_id: str) -> bool:
         client.cancel_order_by_id(order_id)
         logger.info(f"Order {order_id} cancellation requested")
         return True
+    except APIError as e:
+        logger.error(f"Alpaca API error canceling order {order_id}: {e}")
+        return False
     except Exception as e:
-        logger.error(f"Error canceling order {order_id}: {e}")
+        logger.error(f"Unexpected error canceling order {order_id}: {e}")
         return False
 
 
@@ -433,6 +459,9 @@ def get_positions(client: TradingClient) -> list[Position]:
         positions = client.get_all_positions()
         logger.info(f"Retrieved {len(positions)} positions")
         return positions
+    except APIError as e:
+        logger.error(f"Alpaca API error fetching positions: {e}")
+        return []
     except Exception as e:
-        logger.error(f"Error fetching positions: {e}")
+        logger.error(f"Unexpected error fetching positions: {e}")
         return [] 

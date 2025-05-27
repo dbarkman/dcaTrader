@@ -1,42 +1,35 @@
 #!/usr/bin/env python3
 """
-Consistency Checker Caretaker Script
+Consistency Checker - Caretaker Script
 
-This script maintains data consistency between the database and Alpaca's live state.
-It handles two main scenarios:
+This script ensures consistency between the bot's database state and Alpaca's state by:
+1. Verifying that tracked orders in the database still exist on Alpaca
+2. Checking for discrepancies between database positions and Alpaca positions
+3. Cleaning up stale database records
 
-1. Stuck 'buying' cycles: If a DB cycle is 'buying' but no corresponding active BUY order 
-   exists on Alpaca, set cycle to 'watching'.
-
-2. Orphaned 'watching' cycles: If a DB cycle is 'watching' with quantity > 0, but Alpaca 
-   shows no position, mark current cycle as 'error' and create a new 'watching' cycle 
-   with zero quantity for that asset.
-
-Usage:
-    python scripts/consistency_checker.py
-
-Environment Variables:
-    DRY_RUN: If set to 'true', only log actions without actually updating cycles
+Designed to run via cron every 5 minutes.
 """
 
-import sys
 import os
+import sys
 import logging
 from datetime import datetime, timezone, timedelta
+from typing import List, Optional, Dict, Any
 from decimal import Decimal
-import decimal
-from typing import List, Optional
 
 # Add src directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-# Import our utilities and models
-from utils.db_utils import get_db_connection, execute_query, check_connection
-from models.cycle_data import DcaCycle, get_cycle_by_id, update_cycle, create_cycle
-from models.asset_config import DcaAsset, get_asset_config_by_id
-from utils.alpaca_client_rest import get_trading_client
-from alpaca.trading.client import TradingClient
 from alpaca.common.exceptions import APIError
+import mysql.connector
+from mysql.connector import Error
+
+from utils.logging_config import setup_logging
+from utils.db_utils import execute_query, check_connection
+from utils.alpaca_client_rest import get_trading_client, get_order, get_positions
+from models.cycle_data import get_all_cycles, update_cycle, DcaCycle, create_cycle
+from models.asset_config import get_asset_config_by_id
+from alpaca.trading.client import TradingClient
 
 # Configure logging
 logging.basicConfig(
@@ -209,14 +202,14 @@ def is_order_stale_or_terminal(client: TradingClient, order_id: str, current_tim
             logger.info(f"Order {order_id} not found on Alpaca")
             return True
         else:
-            logger.error(f"API error checking order {order_id}: {e}")
+            logger.error(f"Alpaca API error checking order {order_id}: {e}")
             return False
     except Exception as e:
         # Handle invalid order IDs (like fake test IDs) as stale/terminal
         if "badly formed" in str(e).lower() or "uuid" in str(e).lower():
             logger.info(f"Order {order_id} has invalid format (likely test/fake order)")
             return True
-        logger.error(f"Error checking order {order_id}: {e}")
+        logger.error(f"Unexpected error checking order {order_id}: {e}")
         return False
 
 

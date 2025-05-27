@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-Order Manager Caretaker Script
+Order Manager - Caretaker Script
 
-This script manages stale and orphaned orders in the DCA Trading Bot system.
-It should be run periodically via cron to maintain a clean trading environment.
+This script manages stale and orphaned orders by:
+1. Canceling stale BUY orders (old unfilled orders)
+2. Canceling orphaned orders (orders on Alpaca not tracked by active cycles)
+3. Handling stuck market SELL orders
+
+Designed to run via cron every 1-2 minutes.
 
 Functions:
 1. Stale BUY Order Management: Cancel bot's open BUY limit orders older than 5 minutes
@@ -23,6 +27,7 @@ import os
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Set, Optional
+from decimal import Decimal
 
 # Add src directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src'))
@@ -30,7 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), 'src
 # Import our utilities and models
 from utils.db_utils import get_db_connection, execute_query, check_connection
 from utils.alpaca_client_rest import get_trading_client, get_open_orders, cancel_order, get_order
-from models.cycle_data import DcaCycle
+from models.cycle_data import DcaCycle, get_all_cycles, update_cycle
 
 # Configure logging
 logging.basicConfig(
@@ -54,6 +59,10 @@ STALE_ORDER_THRESHOLD_MINUTES = config.stale_order_threshold_minutes
 STALE_ORDER_THRESHOLD = timedelta(minutes=STALE_ORDER_THRESHOLD_MINUTES)
 STUCK_MARKET_SELL_TIMEOUT_SECONDS = 75  # Timeout for stuck market SELL orders
 DRY_RUN = config.dry_run_mode
+
+from alpaca.common.exceptions import APIError
+import mysql.connector
+from mysql.connector import Error
 
 
 def get_current_utc_time() -> datetime:
@@ -275,44 +284,42 @@ def cancel_orders(client, orders_to_cancel: List, order_type: str, active_order_
                 if is_tracked:
                     logger.info(f"[DRY RUN] Would update database to clear tracking for order {order.id}")
                 canceled_count += 1
+                continue
+            
+            # Attempt to cancel the order
+            success = cancel_order(client, order.id)
+            
+            if success:
+                logger.info(f"✅ Canceled {order_type} order: {order.id} "
+                           f"({order.symbol}, {order.side.value}, age: "
+                           f"{calculate_order_age(order.created_at, get_current_utc_time()).total_seconds():.0f}s)")
+                
+                # If this order is tracked by an active cycle, clear the tracking
+                if is_tracked:
+                    try:
+                        clear_query = """
+                        UPDATE dca_cycles 
+                        SET latest_order_id = NULL, latest_order_created_at = NULL 
+                        WHERE latest_order_id = %s
+                        """
+                        rows_affected = execute_query(clear_query, (order_id_str,), commit=True)
+                        if rows_affected and rows_affected > 0:
+                            logger.info(f"🔄 Cleared tracking for canceled order {order.id} in database")
+                        else:
+                            logger.warning(f"⚠️ No database rows updated when clearing tracking for order {order.id}")
+                    except mysql.connector.Error as db_err:
+                        logger.error(f"Database error clearing tracking for order {order.id}: {db_err}")
+                    except Exception as e:
+                        logger.error(f"Unexpected error clearing tracking for order {order.id}: {e}")
+                
+                canceled_count += 1
             else:
-                success = cancel_order(client, order.id)
-                if success:
-                    logger.info(f"✅ Successfully canceled {order_type} order: {order.id} "
-                               f"({order.symbol}, {order.side.value})")
-                    
-                    # If this was a tracked order, update the database
-                    if is_tracked:
-                        logger.info(f"🔄 Updating database to clear tracking for canceled order {order.id}")
-                        try:
-                            # Import here to avoid circular imports
-                            from utils.db_utils import execute_query
-                            
-                            # Update cycles that were tracking this order
-                            update_query = """
-                            UPDATE dca_cycles 
-                            SET status = 'watching', 
-                                latest_order_id = NULL, 
-                                latest_order_created_at = NULL
-                            WHERE latest_order_id = %s
-                            """
-                            
-                            result = execute_query(update_query, (order_id_str,))
-                            if result:
-                                logger.info(f"✅ Updated database: cleared tracking for order {order.id}")
-                            else:
-                                logger.warning(f"⚠️ Failed to update database for order {order.id}")
-                                
-                        except Exception as db_error:
-                            logger.error(f"❌ Database update error for order {order.id}: {db_error}")
-                    
-                    canceled_count += 1
-                else:
-                    logger.warning(f"⚠️ Failed to cancel {order_type} order: {order.id} "
-                                  f"({order.symbol}, {order.side.value})")
-                    
+                logger.warning(f"⚠️ Failed to cancel {order_type} order: {order.id}")
+                
+        except APIError as e:
+            logger.error(f"Alpaca API error canceling {order_type} order {order.id}: {e}")
         except Exception as e:
-            logger.error(f"❌ Error canceling {order_type} order {order.id}: {e}")
+            logger.error(f"Unexpected error canceling {order_type} order {order.id}: {e}")
     
     return canceled_count
 
@@ -386,123 +393,148 @@ def handle_stuck_sell_orders(client, stuck_cycles: List[DcaCycle]) -> int:
 def main():
     """Main order management function."""
     logger.info("="*60)
-    logger.info("ORDER MANAGER CARETAKER SCRIPT STARTED")
+    logger.info("DCA TRADING BOT - ORDER MANAGER")
     logger.info("="*60)
     
     if DRY_RUN:
-        logger.info("🔍 DRY RUN MODE: No orders will actually be canceled")
-    
-    logger.info(f"⏱️ Stale order threshold: {STALE_ORDER_THRESHOLD_MINUTES} minutes")
+        logger.info("🔍 DRY RUN MODE: No actual changes will be made")
     
     try:
-        # Step 1: Initialize connections
-        logger.info("🔧 Initializing connections...")
-        
-        # Check database connection
-        if not check_connection():
-            logger.error("❌ Database connection failed")
+        # Step 1: Initialize Alpaca client
+        logger.info("1. 🔗 Initializing Alpaca client...")
+        try:
+            client = get_trading_client()
+            if not client:
+                logger.error("❌ Failed to initialize Alpaca client")
+                return False
+            logger.info("   ✅ Alpaca client initialized successfully")
+        except APIError as e:
+            logger.error(f"❌ Alpaca API error initializing client: {e}")
             return False
-        logger.info("✅ Database connection established")
-        
-        # Initialize Alpaca client
-        client = get_trading_client()
-        if not client:
-            logger.error("❌ Failed to initialize Alpaca trading client")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error initializing Alpaca client: {e}")
             return False
-        logger.info("✅ Alpaca trading client initialized")
         
-        # Step 2: Get current time and open orders
+        # Step 2: Get all open orders from Alpaca
+        logger.info("2. 📋 Fetching open orders from Alpaca...")
+        try:
+            all_orders = get_open_orders(client)
+            logger.info(f"   📊 Found {len(all_orders)} open orders on Alpaca")
+        except APIError as e:
+            logger.error(f"❌ Alpaca API error fetching open orders: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error fetching open orders: {e}")
+            return False
+        
+        if not all_orders:
+            logger.info("   ℹ️ No open orders found - nothing to manage")
+            logger.info("✅ ORDER MANAGER COMPLETED SUCCESSFULLY")
+            logger.info("="*60)
+            return True
+        
+        # Step 3: Get active cycles and their tracked orders
+        logger.info("3. 🗄️ Fetching active cycles from database...")
+        try:
+            active_cycles = get_all_cycles()
+            active_order_ids = {str(cycle.latest_order_id) for cycle in active_cycles 
+                              if cycle.latest_order_id and cycle.status in ['buying', 'selling']}
+            logger.info(f"   📊 Found {len(active_cycles)} total cycles")
+            logger.info(f"   🔗 Found {len(active_order_ids)} tracked order IDs")
+        except mysql.connector.Error as db_err:
+            logger.error(f"❌ Database error fetching active cycles: {db_err}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ Unexpected error fetching active cycles: {e}")
+            return False
+        
+        # Step 4: Categorize orders
+        logger.info("4. 📂 Categorizing orders...")
         current_time = get_current_utc_time()
-        logger.info(f"🕐 Current UTC time: {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
-        open_orders = get_open_orders(client)
-        logger.info(f"📋 Found {len(open_orders)} open orders on Alpaca")
+        stale_buy_orders = []
+        orphaned_orders = []
+        stuck_sell_orders = []
         
-        # Note: Even if no open orders, we still need to check for stuck SELL orders
-        # as they might be tracked in our database but already processed by Alpaca
-        
-        # Step 3: Handle open orders (if any)
-        stale_canceled = 0
-        orphaned_canceled = 0
-        
-        if open_orders:
-            # Step 3a: Get active cycle order IDs
-            logger.info("🔍 Fetching active cycle order IDs from database...")
-            active_order_ids = get_active_cycle_order_ids()
+        for order in all_orders:
+            order_id_str = str(order.id)
+            order_age = calculate_order_age(order.created_at, current_time)
             
-            # Step 4: Identify stale BUY orders
-            logger.info("🔍 Identifying stale BUY limit orders...")
-            stale_buy_orders = identify_stale_buy_orders(open_orders, active_order_ids, current_time)
-            logger.info(f"Found {len(stale_buy_orders)} stale BUY orders")
+            # Check for stuck market SELL orders first
+            if (order.side.value.lower() == 'sell' and 
+                order.order_type.value.lower() == 'market' and
+                order_age.total_seconds() > STUCK_MARKET_SELL_TIMEOUT_SECONDS):
+                stuck_sell_orders.append(order)
+                continue
             
-            # Step 5: Identify orphaned orders
-            logger.info("🔍 Identifying orphaned orders...")
-            orphaned_orders = identify_orphaned_orders(open_orders, active_order_ids, current_time)
-            logger.info(f"Found {len(orphaned_orders)} orphaned orders")
-            
-            # Step 6: Cancel stale BUY orders (untracked only - preserve tracked orders)
-            if stale_buy_orders:
-                logger.info(f"🧹 Canceling {len(stale_buy_orders)} stale untracked BUY orders...")
-                stale_canceled = cancel_orders(client, stale_buy_orders, "stale BUY", active_order_ids)
-                logger.info(f"✅ Canceled {stale_canceled}/{len(stale_buy_orders)} stale BUY orders")
+            # Check if order is tracked by an active cycle
+            if order_id_str in active_order_ids:
+                # This is a tracked order - preserve it (don't cancel even if stale)
+                # Tracked orders are part of active trading strategies
+                continue
             else:
-                logger.info("✅ No stale untracked BUY orders to cancel")
-            
-            # Step 7: Cancel orphaned orders (non-BUY orders not tracked in DB)
-            # Filter out BUY orders since they were already handled above
-            non_buy_orphaned = [o for o in orphaned_orders if o.side.value != 'buy']
-            
-            if non_buy_orphaned:
-                logger.info(f"🧹 Canceling {len(non_buy_orphaned)} orphaned non-BUY orders...")
-                orphaned_canceled = cancel_orders(client, non_buy_orphaned, "orphaned")
-                logger.info(f"✅ Canceled {orphaned_canceled}/{len(non_buy_orphaned)} orphaned orders")
-            else:
-                logger.info("✅ No orphaned non-BUY orders to cancel")
+                # This is an orphaned order (not tracked by any active cycle)
+                # Check if it's a stale BUY order
+                if (order.side.value.lower() == 'buy' and 
+                    order_age > STALE_ORDER_THRESHOLD):
+                    stale_buy_orders.append(order)
+                else:
+                    orphaned_orders.append(order)
+        
+        logger.info(f"   🕐 Stale BUY orders (>{STALE_ORDER_THRESHOLD_MINUTES}min): {len(stale_buy_orders)}")
+        logger.info(f"   👻 Orphaned orders (not tracked): {len(orphaned_orders)}")
+        logger.info(f"   🔒 Stuck SELL orders (>{STUCK_MARKET_SELL_TIMEOUT_SECONDS}s): {len(stuck_sell_orders)}")
+        
+        # Step 5: Cancel stale BUY orders
+        if stale_buy_orders:
+            logger.info("5. 🕐 Canceling stale BUY orders...")
+            canceled_stale = cancel_orders(client, stale_buy_orders, "stale BUY", active_order_ids)
+            logger.info(f"   ✅ Canceled {canceled_stale}/{len(stale_buy_orders)} stale BUY orders")
         else:
-            logger.info("✅ No open orders found on Alpaca")
-            stale_buy_orders = []
-            orphaned_orders = []
-            non_buy_orphaned = []
-            active_order_ids = set()  # Initialize for summary
-
+            logger.info("5. 🕐 No stale BUY orders to cancel")
         
-        # Step 8: NEW - Handle stuck market SELL orders
-        logger.info("🔍 Identifying stuck market SELL orders...")
-        logger.info(f"⏱️ Stuck SELL order threshold: {STUCK_MARKET_SELL_TIMEOUT_SECONDS} seconds")
-        stuck_sell_cycles = identify_stuck_sell_orders(current_time)
-        logger.info(f"Found {len(stuck_sell_cycles)} stuck SELL orders")
-        
-        if stuck_sell_cycles:
-            logger.info(f"🧹 Handling {len(stuck_sell_cycles)} stuck SELL orders...")
-            stuck_sell_canceled = handle_stuck_sell_orders(client, stuck_sell_cycles)
-            logger.info(f"✅ Canceled {stuck_sell_canceled}/{len(stuck_sell_cycles)} stuck SELL orders")
+        # Step 6: Cancel orphaned orders
+        if orphaned_orders:
+            logger.info("6. 👻 Canceling orphaned orders...")
+            canceled_orphaned = cancel_orders(client, orphaned_orders, "orphaned")
+            logger.info(f"   ✅ Canceled {canceled_orphaned}/{len(orphaned_orders)} orphaned orders")
         else:
-            logger.info("✅ No stuck SELL orders to cancel")
-            stuck_sell_canceled = 0
+            logger.info("6. 👻 No orphaned orders to cancel")
         
-        # Step 9: Summary
-        total_canceled = stale_canceled + orphaned_canceled + stuck_sell_canceled
-        total_identified = len(stale_buy_orders) + len(non_buy_orphaned) + len(stuck_sell_cycles)
-        
-        logger.info("="*60)
-        logger.info("ORDER MANAGER SUMMARY:")
-        logger.info(f"📊 Total orders checked: {len(open_orders)}")
-        logger.info(f"📊 Active cycle orders: {len(active_order_ids)}")
-        logger.info(f"📊 Stale BUY orders found: {len(stale_buy_orders)}")
-        logger.info(f"📊 Orphaned orders found: {len(orphaned_orders)}")
-        logger.info(f"📊 Stuck SELL orders found: {len(stuck_sell_cycles)}")
-        logger.info(f"📊 Total orders canceled: {total_canceled}/{total_identified}")
+        # Step 7: Handle stuck SELL orders
+        if stuck_sell_orders:
+            logger.info("7. 🔒 Handling stuck market SELL orders...")
+            try:
+                stuck_cycles = get_stuck_sell_cycles()
+                canceled_stuck = handle_stuck_sell_orders(client, stuck_cycles)
+                logger.info(f"   ✅ Handled {canceled_stuck} stuck SELL orders")
+            except mysql.connector.Error as db_err:
+                logger.error(f"❌ Database error handling stuck SELL orders: {db_err}")
+            except Exception as e:
+                logger.error(f"❌ Unexpected error handling stuck SELL orders: {e}")
+        else:
+            logger.info("7. 🔒 No stuck market SELL orders to handle")
         
         if DRY_RUN:
-            logger.info("🔍 DRY RUN: No actual cancellations performed")
+            logger.info("🔍 DRY RUN: No actual updates performed")
         
         logger.info("✅ ORDER MANAGER COMPLETED SUCCESSFULLY")
         logger.info("="*60)
         
         return True
         
+    except APIError as e:
+        logger.error(f"❌ Alpaca API error in order manager: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
+    except mysql.connector.Error as db_err:
+        logger.error(f"❌ Database error in order manager: {db_err}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
     except Exception as e:
-        logger.error(f"❌ CRITICAL ERROR in order manager: {e}")
+        logger.error(f"❌ Unexpected error in order manager: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return False

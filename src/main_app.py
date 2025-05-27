@@ -201,7 +201,15 @@ def check_and_place_base_order(quote):
             return
         
         # Step 6: Check for existing positions (ignore tiny positions below minimum order size)
-        positions = get_positions(client)
+        try:
+            positions = get_positions(client)
+        except APIError as e:
+            logger.error(f"Alpaca API error fetching positions for {symbol}: {e}")
+            return
+        except Exception as e:
+            logger.error(f"Unexpected error fetching positions for {symbol}: {e}")
+            return
+            
         existing_position = None
         min_order_qty = 0.000000002  # Alpaca's minimum order quantity for crypto
         
@@ -474,7 +482,7 @@ def check_and_place_safety_order(quote):
             symbol=symbol,
             qty=order_quantity,
             limit_price=limit_price,
-            time_in_force='gtc'  # Use 'gtc' orders for crypto
+            time_in_force='gtc'  # Use 'gtc' orders for crypto (day is not valid for crypto)
         )
         
         if order:
@@ -493,23 +501,29 @@ def check_and_place_safety_order(quote):
                 }
                 update_success = update_cycle(latest_cycle.id, updates)
                 if update_success:
-                    logger.info(f"🔄 Updated cycle {latest_cycle.id} to 'buying' status with order {order.id}")
+                    logger.info(f"🔄 Updated cycle {latest_cycle.id} to 'buying' status with safety order {order.id}")
                 else:
-                    logger.warning(f"⚠️ Failed to update cycle {latest_cycle.id} with order {order.id}")
+                    logger.warning(f"⚠️ Failed to update cycle {latest_cycle.id} with safety order {order.id}")
+            except mysql.connector.Error as db_err:
+                logger.error(f"Database error updating cycle for safety order {symbol}: {db_err}")
             except Exception as e:
-                logger.error(f"Error updating cycle for safety order {symbol}: {e}")
+                logger.error(f"Unexpected error updating cycle for safety order {symbol}: {e}")
             
             logger.info(f"✅ SAFETY LIMIT BUY order PLACED for {symbol}:")
             logger.info(f"   Order ID: {order.id}")
+            logger.info(f"   Safety Order #: {latest_cycle.safety_orders + 1}")
             logger.info(f"   Quantity: {format_quantity(order_quantity)}")
             logger.info(f"   Limit Price: {format_price(limit_price)}")
             logger.info(f"   Time in Force: GTC")
-            logger.info(f"   🛡️ Safety Order #{latest_cycle.safety_orders + 1} triggered by {price_drop_pct:.2f}% price drop")
         else:
             logger.error(f"❌ Failed to place safety order for {symbol}")
             
+    except APIError as e:
+        logger.error(f"Alpaca API error in safety order check for {symbol}: {e}")
+    except mysql.connector.Error as db_err:
+        logger.error(f"Database error in safety order check for {symbol}: {db_err}")
     except Exception as e:
-        logger.error(f"Error in check_and_place_safety_order for {symbol}: {e}")
+        logger.error(f"Unexpected error in check_and_place_safety_order for {symbol}: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
 

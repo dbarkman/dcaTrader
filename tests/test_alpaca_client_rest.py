@@ -12,8 +12,11 @@ from src.utils.alpaca_client_rest import (
     get_account_info,
     get_latest_crypto_price,
     get_latest_crypto_quote,
-    get_api_credentials_from_client
+    get_api_credentials_from_client,
+    place_limit_buy_order,
+    cancel_order
 )
+from alpaca.common.exceptions import APIError
 
 
 @pytest.mark.unit
@@ -169,26 +172,25 @@ def test_get_latest_crypto_price_no_data(mock_crypto_client_class):
 
 @pytest.mark.unit
 @patch('src.utils.alpaca_client_rest.CryptoHistoricalDataClient')
-@patch.dict(os.environ, {
-    'APCA_API_KEY_ID': 'test_key_id',
-    'APCA_API_SECRET_KEY': 'test_secret_key'
-})
 def test_get_latest_crypto_price_api_error(mock_crypto_client_class):
-    """Test that get_latest_crypto_price handles API errors gracefully"""
+    """Test that get_latest_crypto_price handles APIError specifically"""
     
     # Create mock TradingClient
     mock_trading_client = Mock()
     
-    # Create mock crypto data client that raises an exception
+    # Create mock crypto data client that raises APIError
     mock_crypto_client = Mock()
     mock_crypto_client_class.return_value = mock_crypto_client
-    mock_crypto_client.get_crypto_latest_trade.side_effect = Exception("API Error")
+    mock_crypto_client.get_crypto_latest_trade.side_effect = APIError("API rate limit exceeded")
     
     # Call the function
     result = get_latest_crypto_price(mock_trading_client, 'BTC/USD')
     
-    # Verify it returns None on error
+    # Verify it returns None on APIError
     assert result is None
+    
+    # Verify the crypto client was initialized correctly
+    mock_crypto_client_class.assert_called_once()
 
 
 @pytest.mark.unit
@@ -311,4 +313,63 @@ def test_get_api_credentials_from_client_fallback():
     # Verify it fell back to environment variables
     assert api_key == 'fallback_key'
     assert secret_key == 'fallback_secret'
-    assert paper == True 
+    assert paper == True
+
+
+@pytest.mark.unit
+@patch('src.utils.alpaca_client_rest.TradingClient')
+def test_get_account_info_api_error(mock_trading_client_class):
+    """Test that get_account_info handles APIError specifically"""
+    
+    # Create mock client that raises APIError
+    mock_client = Mock()
+    mock_client.get_account.side_effect = APIError("Authentication failed")
+    
+    # Call the function
+    result = get_account_info(mock_client)
+    
+    # Verify it returns None on APIError
+    assert result is None
+
+
+@pytest.mark.unit
+@patch('src.utils.alpaca_client_rest.logger')
+def test_place_limit_buy_order_api_error(mock_logger):
+    """Test that place_limit_buy_order handles APIError specifically"""
+    
+    # Create mock client that raises APIError
+    mock_client = Mock()
+    mock_client.submit_order.side_effect = APIError("Insufficient funds")
+    
+    # Call the function
+    result = place_limit_buy_order(
+        client=mock_client,
+        symbol='BTC/USD',
+        qty=0.001,
+        limit_price=50000.0
+    )
+    
+    # Verify it returns None on APIError
+    assert result is None
+    
+    # Verify specific error logging
+    mock_logger.error.assert_called_with("Alpaca API error placing limit buy order for BTC/USD: Insufficient funds")
+
+
+@pytest.mark.unit
+@patch('src.utils.alpaca_client_rest.logger')
+def test_cancel_order_api_error(mock_logger):
+    """Test that cancel_order handles APIError specifically"""
+    
+    # Create mock client that raises APIError
+    mock_client = Mock()
+    mock_client.cancel_order_by_id.side_effect = APIError("Order not found")
+    
+    # Call the function
+    result = cancel_order(mock_client, "test-order-id")
+    
+    # Verify it returns False on APIError
+    assert result is False
+    
+    # Verify specific error logging
+    mock_logger.error.assert_called_with("Alpaca API error canceling order test-order-id: Order not found") 
