@@ -116,7 +116,7 @@ async def on_crypto_quote(quote):
     Args:
         quote: Quote object from Alpaca containing bid/ask data
     """
-    logger.info(f"Quote: {quote.symbol} - Bid: ${quote.bid_price} @ {quote.bid_size}, Ask: ${quote.ask_price} @ {quote.ask_size}")
+    logger.debug(f"Quote: {quote.symbol} - Bid: ${quote.bid_price} @ {quote.bid_size}, Ask: ${quote.ask_price} @ {quote.ask_size}")
     
     # Phase 4: Check if we should place a base order for this asset
     try:
@@ -162,7 +162,6 @@ def check_and_place_base_order(quote):
         if symbol in recent_orders:
             time_since_order = now - recent_orders[symbol]['timestamp']
             if time_since_order.total_seconds() < recent_order_cooldown:
-                logger.debug(f"Skipping {symbol} - recent order placed {time_since_order.total_seconds():.1f}s ago")
                 return
         
         # Step 2: Get asset configuration
@@ -175,21 +174,16 @@ def check_and_place_base_order(quote):
             logger.debug(f"Asset {symbol} is disabled, skipping base order check")
             return
         
-        logger.debug(f"Checking base order conditions for {symbol}")
-        
         # Step 3: Get latest cycle for this asset
         latest_cycle = get_latest_cycle(asset_config.id)
         if not latest_cycle:
-            logger.debug(f"No cycle found for asset {symbol}, skipping base order check")
             return
         
         # Step 4: Check if cycle is in 'watching' status with zero quantity
         if latest_cycle.status != 'watching':
-            logger.debug(f"Asset {symbol} cycle status is '{latest_cycle.status}', not 'watching' - skipping")
             return
         
         if latest_cycle.quantity != Decimal('0'):
-            logger.debug(f"Asset {symbol} cycle has quantity {latest_cycle.quantity}, not 0 - skipping")
             return
         
         logger.info(f"Base order conditions met for {symbol} - checking Alpaca positions...")
@@ -325,6 +319,12 @@ def check_and_place_base_order(quote):
         else:
             logger.error(f"❌ Failed to place base order for {symbol}")
             
+            # Track failed order attempts to prevent immediate retries
+            recent_orders[symbol] = {
+                'order_id': 'FAILED',
+                'timestamp': now
+            }
+            
     except Exception as e:
         logger.error(f"Error in check_and_place_base_order for {symbol}: {e}")
         import traceback
@@ -357,7 +357,6 @@ def check_and_place_safety_order(quote):
         if symbol in recent_orders:
             time_since_order = now - recent_orders[symbol]['timestamp']
             if time_since_order.total_seconds() < recent_order_cooldown:
-                logger.debug(f"Skipping safety order for {symbol} - recent order placed {time_since_order.total_seconds():.1f}s ago")
                 return
         
         # Step 2: Get asset configuration
@@ -373,16 +372,13 @@ def check_and_place_safety_order(quote):
         # Step 3: Get latest cycle for this asset
         latest_cycle = get_latest_cycle(asset_config.id)
         if not latest_cycle:
-            logger.debug(f"No cycle found for asset {symbol}, skipping safety order check")
             return
         
         # Step 4: Check if cycle is in 'watching' status with quantity > 0 (existing position)
         if latest_cycle.status != 'watching':
-            logger.debug(f"Asset {symbol} cycle status is '{latest_cycle.status}', not 'watching' - skipping safety order")
             return
         
         if latest_cycle.quantity <= Decimal('0'):
-            logger.debug(f"Asset {symbol} cycle has quantity {latest_cycle.quantity}, not > 0 - skipping safety order")
             return
         
         # Step 5: Check if we can place more safety orders
@@ -402,17 +398,8 @@ def check_and_place_safety_order(quote):
         # Convert ask_price to Decimal for consistent calculations
         ask_price_decimal = Decimal(str(ask_price))
         
-        logger.debug(f"Safety order conditions for {symbol}:")
-        logger.debug(f"   Status: {latest_cycle.status} | Quantity: {latest_cycle.quantity}")
-        logger.debug(f"   Safety Orders: {latest_cycle.safety_orders}/{asset_config.max_safety_orders}")
-        logger.debug(f"   Last Fill Price: ${latest_cycle.last_order_fill_price}")
-        logger.debug(f"   Safety Deviation: {asset_config.safety_order_deviation}%")
-        logger.debug(f"   Trigger Price: {format_price(trigger_price)}")
-        logger.debug(f"   Current Ask: ${ask_price}")
-        
         # Step 8: Check if current ask price has dropped enough to trigger safety order
         if ask_price_decimal > trigger_price:
-            logger.debug(f"Ask price ${ask_price} > trigger {format_price(trigger_price)} - no safety order needed")
             return
         
         logger.info(f"🛡️ Safety order conditions met for {symbol}!")
@@ -518,6 +505,12 @@ def check_and_place_safety_order(quote):
         else:
             logger.error(f"❌ Failed to place safety order for {symbol}")
             
+            # Track failed order attempts to prevent immediate retries
+            recent_orders[symbol] = {
+                'order_id': 'FAILED',
+                'timestamp': now
+            }
+            
     except APIError as e:
         logger.error(f"Alpaca API error in safety order check for {symbol}: {e}")
     except mysql.connector.Error as db_err:
@@ -554,7 +547,6 @@ def check_and_place_take_profit_order(quote):
         if symbol in recent_orders:
             time_since_order = now - recent_orders[symbol]['timestamp']
             if time_since_order.total_seconds() < recent_order_cooldown:
-                logger.debug(f"Skipping take-profit for {symbol} - recent order placed {time_since_order.total_seconds():.1f}s ago")
                 return
         
         # Step 2: Get asset configuration
@@ -570,17 +562,14 @@ def check_and_place_take_profit_order(quote):
         # Step 3: Get latest cycle for this asset
         latest_cycle = get_latest_cycle(asset_config.id)
         if not latest_cycle:
-            logger.debug(f"No cycle found for asset {symbol}, skipping take-profit check")
             return
         
         # Step 4: Check if cycle is in valid status for take-profit/TTP processing
         # Valid statuses: 'watching' (standard TP or TTP activation) or 'trailing' (TTP active)
         if latest_cycle.status not in ['watching', 'trailing']:
-            logger.debug(f"Asset {symbol} cycle status is '{latest_cycle.status}', not 'watching' or 'trailing' - skipping take-profit")
             return
         
         if latest_cycle.quantity <= Decimal('0'):
-            logger.debug(f"Asset {symbol} cycle has quantity {latest_cycle.quantity}, not > 0 - skipping take-profit")
             return
         
         # Step 5: Check if we have valid average_purchase_price for take-profit calculation
@@ -617,20 +606,12 @@ def check_and_place_take_profit_order(quote):
         # Convert bid_price to Decimal for consistent calculations
         bid_price_decimal = Decimal(str(bid_price))
         
-        logger.debug(f"Take-profit conditions for {symbol}:")
-        logger.debug(f"   Status: {latest_cycle.status} | Quantity: {latest_cycle.quantity}")
-        logger.debug(f"   Average Purchase Price: ${latest_cycle.average_purchase_price}")
-        logger.debug(f"   Take Profit %: {asset_config.take_profit_percent}%")
-        logger.debug(f"   Take Profit Trigger: {format_price(take_profit_trigger_price)}")
-        logger.debug(f"   Current Bid: ${bid_price}")
-        logger.debug(f"   TTP Enabled: {asset_config.ttp_enabled}")
-        logger.debug(f"   Safety Order Would Trigger: {safety_order_would_trigger}")
+        # Removed verbose debug logging for take-profit conditions
         
         # Step 8: TTP Logic Implementation
         if not asset_config.ttp_enabled:
             # Standard take-profit logic (TTP disabled)
             if bid_price_decimal < take_profit_trigger_price:
-                logger.debug(f"Bid price ${bid_price} < take-profit trigger {format_price(take_profit_trigger_price)} - no take-profit needed")
                 return
             
             logger.info(f"💰 Standard take-profit conditions met for {symbol}!")
@@ -656,7 +637,6 @@ def check_and_place_take_profit_order(quote):
                     
                     return  # Don't place sell order yet, just activated TTP
                 else:
-                    logger.debug(f"TTP enabled but bid price ${bid_price} < activation trigger {format_price(take_profit_trigger_price)} - no action needed")
                     return
                     
             elif latest_cycle.status == 'trailing':
@@ -693,7 +673,6 @@ def check_and_place_take_profit_order(quote):
                         logger.info(f"🎯 TTP sell triggered for {symbol}, cycle {latest_cycle.id}. Peak: ${current_peak}, Deviation: {asset_config.ttp_deviation_percent}%, Current Price: ${bid_price}")
                         logger.info(f"💰 TTP conditions met for {symbol}!")
                     else:
-                        logger.debug(f"TTP active but bid price ${bid_price} >= sell trigger {format_price(ttp_sell_trigger_price)} - no sell needed")
                         return
         
         # Step 9: Validate market data
@@ -714,7 +693,9 @@ def check_and_place_take_profit_order(quote):
             return
         
         # Use actual Alpaca position quantity to avoid quantity mismatches
-        sell_quantity = float(alpaca_position.qty)
+        # Convert to Decimal first to maintain precision, then back to float for order
+        alpaca_qty_decimal = Decimal(str(alpaca_position.qty))
+        sell_quantity = float(alpaca_qty_decimal)
         
         # Validate calculated values before placing order
         if not sell_quantity or sell_quantity <= 0:
@@ -806,6 +787,12 @@ def check_and_place_take_profit_order(quote):
             # TradingStream will complete the cycle update when the order fills
         else:
             logger.error(f"❌ Failed to place take-profit order for {symbol}")
+            
+            # Track failed order attempts to prevent immediate retries
+            recent_orders[symbol] = {
+                'order_id': 'FAILED',
+                'timestamp': now
+            }
             
     except Exception as e:
         logger.error(f"Error in check_and_place_take_profit_order for {symbol}: {e}")

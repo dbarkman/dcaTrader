@@ -210,6 +210,22 @@ def setup_logging(
     
     # Asset logs are included in the main log file (no separate asset file)
     
+    # Suppress noisy third-party library logs
+    # Websockets library logs PING/PONG at DEBUG level - suppress them
+    logging.getLogger('websockets.client').setLevel(logging.INFO)
+    logging.getLogger('websockets.protocol').setLevel(logging.INFO)
+    logging.getLogger('websockets.server').setLevel(logging.INFO)
+    logging.getLogger('websockets').setLevel(logging.INFO)
+    
+    # Alpaca SDK can be noisy at DEBUG level
+    logging.getLogger('alpaca').setLevel(logging.INFO)
+    
+    # Suppress noisy internal utility logs
+    # Database connection/query logs are too verbose at DEBUG level
+    logging.getLogger('utils.db_utils').setLevel(logging.INFO)
+    logging.getLogger('models.cycle_data').setLevel(logging.INFO)
+    logging.getLogger('models.asset_config').setLevel(logging.INFO)
+    
     # Log the logging setup
     setup_logger = logging.getLogger(__name__)
     setup_logger.info(f"Logging configured for {app_name}")
@@ -368,6 +384,22 @@ def setup_main_app_logging(
     
     # Asset logs are included in main.log (no separate asset file for main app)
     
+    # Suppress noisy third-party library logs
+    # Websockets library logs PING/PONG at DEBUG level - suppress them
+    logging.getLogger('websockets.client').setLevel(logging.INFO)
+    logging.getLogger('websockets.protocol').setLevel(logging.INFO)
+    logging.getLogger('websockets.server').setLevel(logging.INFO)
+    logging.getLogger('websockets').setLevel(logging.INFO)
+    
+    # Alpaca SDK can be noisy at DEBUG level
+    logging.getLogger('alpaca').setLevel(logging.INFO)
+    
+    # Suppress noisy internal utility logs
+    # Database connection/query logs are too verbose at DEBUG level
+    logging.getLogger('utils.db_utils').setLevel(logging.INFO)
+    logging.getLogger('models.cycle_data').setLevel(logging.INFO)
+    logging.getLogger('models.asset_config').setLevel(logging.INFO)
+    
     # Log the logging setup
     setup_logger = logging.getLogger(__name__)
     setup_logger.info("Logging configured for main_app with time-based rotation")
@@ -375,6 +407,7 @@ def setup_main_app_logging(
     setup_logger.info(f"Log directory: {config.log_dir}")
     setup_logger.info(f"Log file: main.log (rotated daily, 7 days retention, gzipped)")
     setup_logger.info(f"Asset tracking: {'Enabled' if enable_asset_tracking else 'Disabled'}")
+    setup_logger.info("Noisy debug logs suppressed (websockets, alpaca, db_utils, models)")
     
     return logger
 
