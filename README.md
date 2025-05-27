@@ -93,6 +93,8 @@ CREATE TABLE dca_assets (
     max_safety_orders INT NOT NULL,
     safety_order_deviation DECIMAL(10, 4) NOT NULL,
     take_profit_percent DECIMAL(10, 4) NOT NULL,
+    ttp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    ttp_deviation_percent DECIMAL(10, 4) NULL DEFAULT NULL,
     cooldown_period INT NOT NULL,
     buy_order_price_deviation_percent DECIMAL(10, 4) NOT NULL,
     last_sell_price DECIMAL(20, 10) NULL,
@@ -105,6 +107,8 @@ Comments for dca_assets table:
 - `asset_symbol`: e.g., 'BTC/USD'
 - `safety_order_deviation`: Percentage price drop to trigger safety order
 - `take_profit_percent`: Percentage price rise from avg purchase price to trigger sell
+- `ttp_enabled`: Boolean flag to enable/disable Trailing Take Profit (TTP) for this asset
+- `ttp_deviation_percent`: Percentage deviation for TTP trailing (NULL when TTP disabled)
 - `cooldown_period`: Seconds after a take profit
 - `buy_order_price_deviation_percent`: Percent down from last sell to start new cycle (preempts cooldown)
 - `last_sell_price`: Price of the last successful take-profit sell for this asset
@@ -121,6 +125,7 @@ CREATE TABLE dca_cycles (
     latest_order_id VARCHAR(255) NULL,
     latest_order_created_at TIMESTAMP NULL DEFAULT NULL,
     last_order_fill_price DECIMAL(20, 10) NULL,
+    highest_trailing_price DECIMAL(20, 10) NULL DEFAULT NULL,
     completed_at TIMESTAMP NULL,
     sell_price DECIMAL(20, 10) NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -130,12 +135,14 @@ CREATE TABLE dca_cycles (
 ```
 
 Comments for dca_cycles table:
-- `status`: e.g., 'watching', 'buying', 'selling', 'cooldown', 'complete', 'error'
+- `status`: e.g., 'watching', 'buying', 'selling', 'trailing', 'cooldown', 'complete', 'error'
 - `quantity`: Total quantity of the asset held in this cycle
 - `average_purchase_price`: Weighted average purchase price for this cycle
 - `safety_orders`: Number of safety orders filled in this cycle
 - `latest_order_id`: Alpaca order ID of the most recent order for this cycle
+- `latest_order_created_at`: Timestamp when the latest order was created
 - `last_order_fill_price`: Fill price of the most recent BUY order in this cycle
+- `highest_trailing_price`: Highest price reached during TTP trailing (NULL when TTP not active)
 - `completed_at`: Timestamp when the cycle reached a terminal status ('complete', 'error')
 - `sell_price`: Final sell price when cycle is completed (for P/L calculation)
 
@@ -182,18 +189,36 @@ ALERT_EMAIL_SMTP_PASSWORD="your_smtp_password"
 INSERT INTO dca_assets (
     asset_symbol, is_enabled, base_order_amount, safety_order_amount,
     max_safety_orders, safety_order_deviation, take_profit_percent,
-    cooldown_period, buy_order_price_deviation_percent
+    ttp_enabled, ttp_deviation_percent, cooldown_period, buy_order_price_deviation_percent
 ) VALUES (
     'BTC/USD', TRUE, 20.00, 20.00,
     5, 1.5, 1.0,
-    300, 2.0
+    FALSE, NULL, 300, 2.0
 );
 ```
 
    Parameter explanations:
    - Base and Safety order amounts in USD: 20.00, 20.00
    - Max 5 safety orders, 1.5% drop for SO, 1.0% take profit
+   - TTP disabled (FALSE), no TTP deviation (NULL)
    - 300s (5 min) cooldown, 2% drop from last sell to restart early
+   
+   **For TTP-enabled assets, use:**
+```sql
+INSERT INTO dca_assets (
+    asset_symbol, is_enabled, base_order_amount, safety_order_amount,
+    max_safety_orders, safety_order_deviation, take_profit_percent,
+    ttp_enabled, ttp_deviation_percent, cooldown_period, buy_order_price_deviation_percent
+) VALUES (
+    'ETH/USD', TRUE, 100.00, 50.00,
+    3, 2.0, 2.0,
+    TRUE, 0.5, 600, 3.0
+);
+```
+   
+   **TTP Parameters:**
+   - `ttp_enabled`: TRUE to enable Trailing Take Profit
+   - `ttp_deviation_percent`: 0.5% deviation (sell when price drops 0.5% from peak)
 
 ### **5.3. Cron Job Setup**
 
