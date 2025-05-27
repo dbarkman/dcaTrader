@@ -539,10 +539,6 @@ def check_and_place_take_profit_order(quote):
     ask_price = quote.ask_price
     bid_price = quote.bid_price
     
-    # Debug PEPE/USD entry
-    if symbol == 'PEPE/USD':
-        logger.info(f"🔍 PEPE/USD Take-Profit Function Entry")
-    
     try:
         # Step 1: Check for recent orders to prevent duplicates
         now = datetime.now()
@@ -558,21 +554,21 @@ def check_and_place_take_profit_order(quote):
         if not asset_config:
             # Asset not configured - skip silently
             return
-        
+
         if not asset_config.is_enabled:
             logger.debug(f"Asset {symbol} is disabled, skipping take-profit check")
             return
-        
+
         # Step 3: Get latest cycle for this asset
         latest_cycle = get_latest_cycle(asset_config.id)
         if not latest_cycle:
             return
-        
+
         # Step 4: Check if cycle is in valid status for take-profit/TTP processing
         # Valid statuses: 'watching' (standard TP or TTP activation) or 'trailing' (TTP active)
         if latest_cycle.status not in ['watching', 'trailing']:
             return
-        
+
         if latest_cycle.quantity <= Decimal('0'):
             return
         
@@ -609,8 +605,6 @@ def check_and_place_take_profit_order(quote):
         
         # Convert bid_price to Decimal for consistent calculations
         bid_price_decimal = Decimal(str(bid_price))
-        
-        # Removed verbose debug logging for take-profit conditions
         
         # Step 8: TTP Logic Implementation
         if not asset_config.ttp_enabled:
@@ -699,18 +693,6 @@ def check_and_place_take_profit_order(quote):
         # Use actual Alpaca position quantity to avoid quantity mismatches
         # Handle precision issues by using the exact string value from Alpaca
         alpaca_qty_str = str(alpaca_position.qty)
-        
-        # Debug logging for PEPE/USD precision issue
-        if symbol == 'PEPE/USD':
-            logger.info(f"🔍 PEPE/USD Debug:")
-            logger.info(f"   Alpaca position.qty: {alpaca_position.qty} (type: {type(alpaca_position.qty)})")
-            logger.info(f"   String conversion: '{alpaca_qty_str}'")
-            
-            # Test float conversion to show the precision issue
-            test_float = float(alpaca_qty_str)
-            logger.info(f"   Float conversion: {test_float}")
-            logger.info(f"   Float repr: {repr(test_float)}")
-            logger.info(f"   🚨 PRECISION ISSUE: float() rounds {alpaca_qty_str} to {test_float}")
         
         # For all assets, use normal float conversion
         sell_quantity = float(alpaca_qty_str)

@@ -94,8 +94,8 @@ async def test_on_crypto_quote_handler(mock_check_base_order, caplog):
     mock_quote.ask_price = 50001.00
     mock_quote.ask_size = 2.0
     
-    # Set logging level to capture INFO messages
-    caplog.set_level(logging.INFO)
+    # Set logging level to capture DEBUG messages (quote logging was changed to DEBUG for noise reduction)
+    caplog.set_level(logging.DEBUG)
     
     # Call the handler
     await on_crypto_quote(mock_quote)
