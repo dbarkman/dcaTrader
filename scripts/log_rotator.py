@@ -6,6 +6,8 @@ This script handles daily rotation of logs that are not managed by Python's
 TimedRotatingFileHandler. Specifically designed for:
 - caretakers.log (written by multiple short-lived cron scripts)
 - cron.log (managed by shell redirection)
+- test.log (written by test scripts)
+- test.log (written by test scripts)
 
 Features:
 - Daily rotation with timestamp naming
@@ -45,7 +47,7 @@ except ImportError:
     LOG_DIR = Path(__file__).parent.parent / 'logs'
 
 # Configuration
-DEFAULT_FILES_TO_ROTATE = ["caretakers.log", "cron.log"]
+DEFAULT_FILES_TO_ROTATE = ["caretakers.log", "cron.log", "test.log"]
 DEFAULT_DAYS_TO_KEEP = 7
 DEFAULT_LOG_DIR = LOG_DIR
 
