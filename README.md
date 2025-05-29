@@ -85,146 +85,111 @@ pip install -r requirements.txt
 **Table: dca_assets** (Stores configuration for tradable assets)
 ```sql
 CREATE TABLE dca_assets (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    asset_symbol VARCHAR(25) NOT NULL UNIQUE,
-    is_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    base_order_amount DECIMAL(20, 10) NOT NULL,
-    safety_order_amount DECIMAL(20, 10) NOT NULL,
-    max_safety_orders INT NOT NULL,
-    safety_order_deviation DECIMAL(10, 4) NOT NULL,
-    take_profit_percent DECIMAL(10, 4) NOT NULL,
-    ttp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
-    ttp_deviation_percent DECIMAL(10, 4) NULL DEFAULT NULL,
-    cooldown_period INT NOT NULL,
-    buy_order_price_deviation_percent DECIMAL(10, 4) NOT NULL,
-    last_sell_price DECIMAL(20, 10) NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+  id int(11) NOT NULL,
+  asset_symbol varchar(25) NOT NULL,
+  is_enabled tinyint(1) NOT NULL DEFAULT 1,
+  base_order_amount decimal(20,10) NOT NULL DEFAULT 10.0000000000,
+  safety_order_amount decimal(20,10) NOT NULL DEFAULT 20.0000000000,
+  max_safety_orders int(11) NOT NULL DEFAULT 15,
+  safety_order_deviation decimal(10,4) NOT NULL DEFAULT 0.9000,
+  take_profit_percent decimal(10,4) NOT NULL DEFAULT 2.0000,
+  ttp_enabled tinyint(1) NOT NULL DEFAULT 1,
+  ttp_deviation_percent decimal(10,4) DEFAULT 1.0000,
+  last_sell_price decimal(20,10) DEFAULT NULL,
+  buy_order_price_deviation_percent decimal(10,4) NOT NULL DEFAULT 1.0000,
+  cooldown_period int(11) NOT NULL DEFAULT 120,
+  created_at timestamp NOT NULL DEFAULT current_timestamp(),
+  updated_at timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-Comments for dca_assets table:
-- `asset_symbol`: e.g., 'BTC/USD'
-- `safety_order_deviation`: Percentage price drop to trigger safety order
-- `take_profit_percent`: Percentage price rise from avg purchase price to trigger sell
-- `ttp_enabled`: Boolean flag to enable/disable Trailing Take Profit (TTP) for this asset
-- `ttp_deviation_percent`: Percentage deviation for TTP trailing (NULL when TTP disabled)
-- `cooldown_period`: Seconds after a take profit
-- `buy_order_price_deviation_percent`: Percent down from last sell to start new cycle (preempts cooldown)
-- `last_sell_price`: Price of the last successful take-profit sell for this asset
+ALTER TABLE dca_assets
+  ADD PRIMARY KEY (id),
+  ADD UNIQUE KEY asset_symbol (asset_symbol);
+
+ALTER TABLE dca_assets
+  MODIFY id int(11) NOT NULL AUTO_INCREMENT;
+```
 
 **Table: dca_cycles** (Stores data for each trading cycle of an asset)
 ```sql
 CREATE TABLE dca_cycles (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    asset_id INT NOT NULL,
-    status VARCHAR(20) NOT NULL,
-    quantity DECIMAL(30, 15) NOT NULL DEFAULT 0,
-    average_purchase_price DECIMAL(20, 10) NOT NULL DEFAULT 0,
-    safety_orders INT NOT NULL DEFAULT 0,
-    latest_order_id VARCHAR(255) NULL,
-    latest_order_created_at TIMESTAMP NULL DEFAULT NULL,
-    last_order_fill_price DECIMAL(20, 10) NULL,
-    highest_trailing_price DECIMAL(20, 10) NULL DEFAULT NULL,
-    completed_at TIMESTAMP NULL,
-    sell_price DECIMAL(20, 10) NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (asset_id) REFERENCES dca_assets(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+  id int(11) NOT NULL,
+  asset_id int(11) NOT NULL,
+  status varchar(20) NOT NULL,
+  quantity decimal(30,15) NOT NULL DEFAULT 0.000000000000000,
+  average_purchase_price decimal(20,10) NOT NULL DEFAULT 0.0000000000,
+  safety_orders int(11) NOT NULL DEFAULT 0,
+  latest_order_id varchar(255) DEFAULT NULL,
+  latest_order_created_at timestamp NULL DEFAULT NULL,
+  last_order_fill_price decimal(20,10) DEFAULT NULL,
+  highest_trailing_price decimal(20,10) DEFAULT NULL,
+  completed_at timestamp NULL DEFAULT NULL,
+  sell_price decimal(20,10) DEFAULT NULL,
+  created_at timestamp NOT NULL DEFAULT current_timestamp(),
+  updated_at timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-Comments for dca_cycles table:
-- `status`: e.g., 'watching', 'buying', 'selling', 'trailing', 'cooldown', 'complete', 'error'
-- `quantity`: Total quantity of the asset held in this cycle
-- `average_purchase_price`: Weighted average purchase price for this cycle
-- `safety_orders`: Number of safety orders filled in this cycle
-- `latest_order_id`: Alpaca order ID of the most recent order for this cycle
-- `latest_order_created_at`: Timestamp when the latest order was created
-- `last_order_fill_price`: Fill price of the most recent BUY order in this cycle
-- `highest_trailing_price`: Highest price reached during TTP trailing (NULL when TTP not active)
-- `completed_at`: Timestamp when the cycle reached a terminal status ('complete', 'error')
-- `sell_price`: Final sell price when cycle is completed (for P/L calculation)
+ALTER TABLE dca_cycles
+  ADD PRIMARY KEY (id),
+  ADD KEY asset_id (asset_id);
+
+ALTER TABLE dca_cycles
+  MODIFY id int(11) NOT NULL AUTO_INCREMENT;
+```
 
 **Table: dca_orders** (Stores order data fetched from Alpaca API)
 ```sql
 CREATE TABLE dca_orders (
-    -- Primary key and identifiers
-    id VARCHAR(36) NOT NULL PRIMARY KEY,  -- UUID from Alpaca
-    client_order_id VARCHAR(36) NOT NULL,  -- UUID client order ID
-    
-    -- Asset information
-    asset_id VARCHAR(36) NULL,  -- UUID asset ID
-    symbol VARCHAR(25) NULL,  -- e.g., 'BTC/USD', 'LINK/USD'
-    asset_class VARCHAR(20) NULL,  -- e.g., 'CRYPTO'
-    
-    -- Order details
-    order_class VARCHAR(20) NOT NULL,  -- e.g., 'SIMPLE', 'BRACKET', 'OCO', 'OTO'
-    order_type VARCHAR(20) NULL,  -- e.g., 'MARKET', 'LIMIT', 'STOP', 'STOP_LIMIT'
-    type VARCHAR(20) NULL,  -- Duplicate of order_type (API provides both)
-    side VARCHAR(10) NULL,  -- 'BUY' or 'SELL'
-    position_intent VARCHAR(20) NULL,  -- e.g., 'BUY_TO_OPEN', 'SELL_TO_CLOSE'
-    
-    -- Quantities and prices
-    qty DECIMAL(30, 15) NULL,  -- Order quantity
-    notional DECIMAL(20, 10) NULL,  -- Notional value (for fractional shares)
-    filled_qty DECIMAL(30, 15) NULL,  -- Filled quantity
-    filled_avg_price DECIMAL(20, 10) NULL,  -- Average fill price
-    limit_price DECIMAL(20, 10) NULL,  -- Limit price
-    stop_price DECIMAL(20, 10) NULL,  -- Stop price
-    trail_price DECIMAL(20, 10) NULL,  -- Trail price
-    trail_percent DECIMAL(10, 4) NULL,  -- Trail percentage
-    ratio_qty DECIMAL(30, 15) NULL,  -- Ratio quantity (for ratio orders)
-    hwm DECIMAL(20, 10) NULL,  -- High water mark (for trailing orders)
-    
-    -- Order status and timing
-    status VARCHAR(20) NOT NULL,  -- e.g., 'NEW', 'FILLED', 'CANCELED', 'EXPIRED'
-    time_in_force VARCHAR(10) NOT NULL,  -- e.g., 'DAY', 'GTC', 'IOC', 'FOK'
-    extended_hours BOOLEAN NOT NULL DEFAULT FALSE,
-    
-    -- Timestamps
-    created_at TIMESTAMP NOT NULL,
-    updated_at TIMESTAMP NOT NULL,
-    submitted_at TIMESTAMP NOT NULL,
-    filled_at TIMESTAMP NULL,
-    canceled_at TIMESTAMP NULL,
-    expired_at TIMESTAMP NULL,
-    expires_at TIMESTAMP NULL,
-    failed_at TIMESTAMP NULL,
-    replaced_at TIMESTAMP NULL,
-    
-    -- Order relationships
-    replaced_by VARCHAR(36) NULL,  -- UUID of replacing order
-    replaces VARCHAR(36) NULL,  -- UUID of replaced order
-    
-    -- Complex order legs (JSON for multi-leg orders)
-    legs JSON NULL,  -- For bracket/OCO orders with multiple legs
-    
-    -- Metadata
-    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_by_fetch_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    
-    -- Indexes for common queries
-    INDEX idx_symbol (symbol),
-    INDEX idx_status (status),
-    INDEX idx_side (side),
-    INDEX idx_created_at (created_at),
-    INDEX idx_filled_at (filled_at),
-    INDEX idx_client_order_id (client_order_id),
-    INDEX idx_fetched_at (fetched_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-```
+  id varchar(36) NOT NULL,
+  client_order_id varchar(36) NOT NULL,
+  asset_id varchar(36) DEFAULT NULL,
+  symbol varchar(25) DEFAULT NULL,
+  asset_class varchar(20) DEFAULT NULL,
+  order_class varchar(20) NOT NULL,
+  order_type varchar(20) DEFAULT NULL,
+  type varchar(20) DEFAULT NULL,
+  side varchar(10) DEFAULT NULL,
+  position_intent varchar(20) DEFAULT NULL,
+  qty decimal(30,15) DEFAULT NULL,
+  notional decimal(20,10) DEFAULT NULL,
+  filled_qty decimal(30,15) DEFAULT NULL,
+  filled_avg_price decimal(20,10) DEFAULT NULL,
+  limit_price decimal(20,10) DEFAULT NULL,
+  stop_price decimal(20,10) DEFAULT NULL,
+  trail_price decimal(20,10) DEFAULT NULL,
+  trail_percent decimal(10,4) DEFAULT NULL,
+  ratio_qty decimal(30,15) DEFAULT NULL,
+  hwm decimal(20,10) DEFAULT NULL,
+  status varchar(20) NOT NULL,
+  time_in_force varchar(10) NOT NULL,
+  extended_hours tinyint(1) NOT NULL DEFAULT 0,
+  created_at timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  updated_at timestamp NOT NULL DEFAULT '0000-00-00 00:00:00',
+  submitted_at timestamp NOT NULL DEFAULT '0000-00-00 00:00:00',
+  filled_at timestamp NULL DEFAULT NULL,
+  canceled_at timestamp NULL DEFAULT NULL,
+  expired_at timestamp NULL DEFAULT NULL,
+  expires_at timestamp NULL DEFAULT NULL,
+  failed_at timestamp NULL DEFAULT NULL,
+  replaced_at timestamp NULL DEFAULT NULL,
+  replaced_by varchar(36) DEFAULT NULL,
+  replaces varchar(36) DEFAULT NULL,
+  legs longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(legs)),
+  fetched_at timestamp NOT NULL DEFAULT current_timestamp(),
+  updated_by_fetch_at timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp()
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
-Comments for dca_orders table:
-- `id`: Alpaca's UUID for the order (primary key)
-- `client_order_id`: Our client-generated UUID for the order
-- All price fields use DECIMAL(20,10) for precision
-- All quantity fields use DECIMAL(30,15) for high precision crypto amounts
-- `legs`: JSON field for complex multi-leg orders (bracket, OCO, etc.)
-- `fetched_at`: When we fetched this data from API
-- `updated_by_fetch_at`: Last time this record was updated by fetch
-- No foreign key constraints to avoid deletion cascades
-- Comprehensive indexing for performance on common queries
+
+ALTER TABLE dca_orders
+  ADD PRIMARY KEY (id),
+  ADD KEY idx_symbol (symbol),
+  ADD KEY idx_status (status),
+  ADD KEY idx_side (side),
+  ADD KEY idx_created_at (created_at),
+  ADD KEY idx_filled_at (filled_at),
+  ADD KEY idx_client_order_id (client_order_id),
+  ADD KEY idx_fetched_at (fetched_at);
+```
 
 5. Configure Environment Variables:
    Create a .env file in the project root directory with your Alpaca API keys and database credentials:
@@ -263,65 +228,37 @@ ALERT_EMAIL_SMTP_PASSWORD="your_smtp_password"
    - Ensure this .env file is added to your .gitignore to prevent committing sensitive credentials.
 
 6. Populate dca_assets Table:
-   Manually insert rows into the dca_assets table for the cryptocurrencies you want the bot to trade. For example:
-   
-```sql
-INSERT INTO dca_assets (
-    asset_symbol, is_enabled, base_order_amount, safety_order_amount,
-    max_safety_orders, safety_order_deviation, take_profit_percent,
-    ttp_enabled, ttp_deviation_percent, cooldown_period, buy_order_price_deviation_percent
-) VALUES (
-    'BTC/USD', TRUE, 20.00, 20.00,
-    5, 1.5, 1.0,
-    FALSE, NULL, 300, 2.0
-);
-```
+   Run the script, scripts/add_asset.py followed by a comma separated list of assets:
 
-   Parameter explanations:
-   - Base and Safety order amounts in USD: 20.00, 20.00
-   - Max 5 safety orders, 1.5% drop for SO, 1.0% take profit
-   - TTP disabled (FALSE), no TTP deviation (NULL)
-   - 300s (5 min) cooldown, 2% drop from last sell to restart early
-   
-   **For TTP-enabled assets, use:**
-```sql
-INSERT INTO dca_assets (
-    asset_symbol, is_enabled, base_order_amount, safety_order_amount,
-    max_safety_orders, safety_order_deviation, take_profit_percent,
-    ttp_enabled, ttp_deviation_percent, cooldown_period, buy_order_price_deviation_percent
-) VALUES (
-    'ETH/USD', TRUE, 100.00, 50.00,
-    3, 2.0, 2.0,
-    TRUE, 0.5, 600, 3.0
-);
-```
-   
-   **TTP Parameters:**
-   - `ttp_enabled`: TRUE to enable Trailing Take Profit
-   - `ttp_deviation_percent`: 0.5% deviation (sell when price drops 0.5% from peak)
+   ```
+   python scripts/add_asset.py BTC/USD,ETH/USD,XRP/USD,SOL/USD,DOGE/USD,LINK/USD,AVAX/USD,SHIB/USD,BCH/USD,LTC/USD,DOT/USD,PEPE/USD,AAVE/USD,UNI/USD,TRUMP/USD --enabled; python scripts/add_asset.py MKR/USD,GRT/USD,CRV/USD,XTZ/USD,BAT/USD,SUSHI/USD,YFI/USD
+   ```
 
 ### **5.3. Cron Job Setup**
 
 The following cron jobs need to be set up on your Linux server. Ensure the paths to the Python interpreter (within your virtual environment) and the scripts are correct.
 
 ```cron
-# Watchdog for the main WebSocket application (e.g., runs every 5 minutes)
-*/5 * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/watchdog.py >> /path_to_project/logs/cron.log 2>&1
+# Watchdog (every 3 minutes)
+*/3 * * * *	cd /home/david/dcaTrader && /home/david/dcaTrader/venv/bin/python scripts/watchdog.py >> logs/cron.log 2>&1
 
-# Caretaker: Order Manager (e.g., runs every 1 minute)
-* * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/order_manager.py >> /path_to_project/logs/cron.log 2>&1
+# Order Manager (every minute)
+* * * * *	cd /home/david/dcaTrader && /home/david/dcaTrader/venv/bin/python scripts/order_manager.py >> logs/cron.log 2>&1
 
-# Caretaker: Cooldown Manager (e.g., runs every 1 minute)
-* * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/cooldown_manager.py >> /path_to_project/logs/cron.log 2>&1
+# Cooldown Manager (every minute)  
+* * * * *	cd /home/david/dcaTrader && /home/david/dcaTrader/venv/bin/python scripts/cooldown_manager.py >> logs/cron.log 2>&1
 
-# Caretaker: Consistency Checker (e.g., runs every 5 minutes)
-*/5 * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/consistency_checker.py >> /path_to_project/logs/cron.log 2>&1
+# Consistency Checker (every 5 minutes)
+*/5 * * * *	cd /home/david/dcaTrader && /home/david/dcaTrader/venv/bin/python scripts/consistency_checker.py >> logs/cron.log 2>&1
 
-# Caretaker: Fetch Orders (e.g., runs every 15 minutes)
-*/15 * * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/fetch_orders.py >> /path_to_project/logs/cron.log 2>&1
+# Asset Caretaker (every 15 minutes)
+*/5 * * * *	cd /home/david/dcaTrader && /home/david/dcaTrader/venv/bin/python scripts/asset_caretaker.py >> logs/cron.log 2>&1
 
-# Log Rotation (runs daily at midnight)
-0 0 * * * /path_to_project_venv/venv/bin/python /path_to_project/scripts/log_rotator.py >> /path_to_project/logs/log_rotator.log 2>&1
+# Log Rotation
+0 8 * * *	cd /home/david/dcaTrader && /home/david/dcaTrader/venv/bin/python scripts/log_rotator.py >> logs/cron.log 2>&1
+
+# Fetch Orders (every 15 minutes)
+*/15 * * * *     cd /home/david/dcaTrader && /home/david/dcaTrader/venv/bin/python scripts/fetch_orders.py >> logs/cron.log 2>&1
 ```
 
 Setup notes:
