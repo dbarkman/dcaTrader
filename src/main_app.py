@@ -1690,11 +1690,8 @@ def setup_signal_handlers():
                 # Use the stream's internal stop method if available
                 if hasattr(crypto_stream_ref, '_should_run'):
                     crypto_stream_ref._should_run = False
-                if hasattr(crypto_stream_ref, '_ws') and crypto_stream_ref._ws:
-                    try:
-                        crypto_stream_ref._ws.close()
-                    except:
-                        pass
+                # Remove direct WebSocket close to avoid RuntimeWarning
+                # The stream will close its WebSocket properly through its async mechanisms
             except Exception as e:
                 logger.error(f"Error stopping CryptoDataStream: {e}")
         
@@ -1704,11 +1701,8 @@ def setup_signal_handlers():
                 # Use the stream's internal stop method if available
                 if hasattr(trading_stream_ref, '_should_run'):
                     trading_stream_ref._should_run = False
-                if hasattr(trading_stream_ref, '_ws') and trading_stream_ref._ws:
-                    try:
-                        trading_stream_ref._ws.close()
-                    except:
-                        pass
+                # Remove direct WebSocket close to avoid RuntimeWarning
+                # The stream will close its WebSocket properly through its async mechanisms
             except Exception as e:
                 logger.error(f"Error stopping TradingStream: {e}")
         

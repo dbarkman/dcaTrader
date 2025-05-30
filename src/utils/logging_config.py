@@ -190,11 +190,14 @@ def setup_logging(
         logger.setLevel(logging.DEBUG)
         logger.handlers.clear()
     
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(console_level_int)
-    console_handler.setFormatter(console_formatter)
-    logger.addHandler(console_handler)
+    # Console handler - only add if console logging is not explicitly disabled
+    disable_console = os.getenv('DISABLE_MAIN_APP_CONSOLE_LOGGING', '').lower() == 'true'
+    
+    if not disable_console:
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(console_level_int)
+        console_handler.setFormatter(console_formatter)
+        logger.addHandler(console_handler)
     
     # File handler with rotation
     log_file = config.log_dir / f"{app_name}.log"
@@ -363,11 +366,7 @@ def setup_main_app_logging(
         logger.setLevel(logging.DEBUG)
         logger.handlers.clear()
     
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(console_level_int)
-    console_handler.setFormatter(console_formatter)
-    logger.addHandler(console_handler)
+    # main_app logs only to files, never to console
     
     # Time-based rotating file handler for main.log with gzip compression
     log_file = config.log_dir / "main.log"
