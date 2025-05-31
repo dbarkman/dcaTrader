@@ -41,7 +41,7 @@ def colored(text, color):
     return f"{color}{text}{Colors.END}"
 
 def format_number(value, is_currency=False, decimal_places=2):
-    """Format numbers with commas for values >= 1,000."""
+    """Format numbers with commas for values >= 1,000 and dynamic decimal places for small currencies."""
     try:
         if isinstance(value, str):
             # Handle string values that might contain currency symbols
@@ -50,16 +50,39 @@ def format_number(value, is_currency=False, decimal_places=2):
         else:
             num_value = float(value)
         
-        if abs(num_value) >= 1000:
-            if is_currency:
-                return f"${num_value:,.{decimal_places}f}"
+        # Dynamic decimal places for currency values
+        if is_currency:
+            if abs(num_value) >= 1000:
+                # Large amounts: use 2 decimal places with commas
+                return f"${num_value:,.2f}"
+            elif abs(num_value) >= 1:
+                # Medium amounts: use 2 decimal places
+                return f"${num_value:.2f}"
+            elif abs(num_value) >= 0.01:
+                # Small amounts: use 4 decimal places
+                return f"${num_value:.4f}"
+            elif abs(num_value) >= 0.001:
+                # Smaller amounts: use 6 decimal places
+                return f"${num_value:.6f}"
+            elif abs(num_value) >= 0.00001:
+                # Very small amounts (like SHIB): use 10 decimal places
+                return f"${num_value:.10f}"
+            elif abs(num_value) >= 0.000001:
+                # Extremely small amounts (like PEPE): use 12 decimal places
+                return f"${num_value:.12f}"
+            elif abs(num_value) > 0:
+                # Ultra small amounts: use 14 decimal places
+                return f"${num_value:.14f}"
             else:
-                return f"{num_value:,.{decimal_places}f}"
+                # Zero value
+                return "$0.00"
         else:
-            if is_currency:
-                return f"${num_value:.{decimal_places}f}"
+            # Non-currency formatting
+            if abs(num_value) >= 1000:
+                return f"{num_value:,.{decimal_places}f}"
             else:
                 return f"{num_value:.{decimal_places}f}"
+                
     except (ValueError, TypeError):
         return str(value)
 
@@ -84,13 +107,13 @@ def print_grid(headers, rows, title=None):
         col_widths.append(min(max(max_width + 2, 8), 20))
     
     # Print header
-    header_line = '|'.join(colored(str(headers[i]).ljust(col_widths[i]), Colors.BOLD) for i in range(len(headers)))
+    header_line = ' | '.join(colored(str(headers[i]).ljust(col_widths[i]), Colors.BOLD) for i in range(len(headers)))
     print(header_line)
-    print(colored('-' * sum(col_widths) + '-' * (len(headers) - 1), Colors.BLUE))
+    print(colored('-' * (sum(col_widths) + (len(headers) - 1) * 3), Colors.BLUE))
     
     # Print rows
     for row in rows:
-        row_line = '|'.join(str(row[i] if i < len(row) else '').ljust(col_widths[i]) for i in range(len(headers)))
+        row_line = ' | '.join(str(row[i] if i < len(row) else '').ljust(col_widths[i]) for i in range(len(headers)))
         print(row_line)
 
 def get_tradingview_rating(symbol):
@@ -324,6 +347,14 @@ def analyze_completed_cycles():
         pl_color = Colors.GREEN if total_realized_pl >= 0 else Colors.RED
         print(f'💵 Total Realized P/L: {colored(format_number(total_realized_pl, is_currency=True), pl_color)}')
         
+        # Calculate and display ROI
+        if total_invested > 0:
+            roi_percent = (total_realized_pl / total_invested) * 100
+            roi_color = Colors.GREEN if roi_percent >= 0 else Colors.RED
+            print(f'📈 ROI: {colored(f"{roi_percent:+.2f}%", roi_color)}')
+        else:
+            print(f'📈 ROI: {colored("N/A", Colors.YELLOW)}')
+        
         print(f'📈 Cycles with sell_price data: {colored(f"{cycles_with_sell_price}/{total_cycles}", Colors.BLUE)}')
         
         if cycles_with_sell_price < total_cycles:
@@ -367,13 +398,13 @@ def analyze_active_cycles_detail():
     active_query = '''
     SELECT 
         a.asset_symbol,
+        c.id as cycle_id,
         c.status,
         c.quantity,
         c.average_purchase_price,
         c.safety_orders,
-        c.latest_order_created_at,
         c.last_order_fill_price,
-        c.highest_trailing_price
+        c.created_at as cycle_created_at
     FROM dca_cycles c
     JOIN dca_assets a ON c.asset_id = a.id
     WHERE c.status NOT IN ('complete', 'error') AND c.quantity > 0
@@ -401,16 +432,47 @@ def analyze_active_cycles_detail():
     
     for row in active_results:
         symbol = row['asset_symbol']
+        cycle_id = row['cycle_id']
         status = row['status']
         quantity = Decimal(str(row['quantity']))
         avg_price = Decimal(str(row['average_purchase_price']))
         safety_orders = row['safety_orders']
-        latest_order_time = row['latest_order_created_at']
         last_fill_price = Decimal(str(row['last_order_fill_price'])) if row['last_order_fill_price'] else None
-        highest_trailing = Decimal(str(row['highest_trailing_price'])) if row['highest_trailing_price'] else None
+        cycle_created_at = row['cycle_created_at']
         
-        # Format time as 24-hour UTC
-        time_str = latest_order_time.strftime('%H:%M:%S') if latest_order_time else 'N/A'
+        # Get first buy order price and timestamp from dca_orders table
+        first_buy_query = '''
+        SELECT 
+            filled_avg_price as first_buy_price,
+            created_at as first_buy_time
+        FROM dca_orders 
+        WHERE symbol = %s 
+        AND side = 'BUY' 
+        AND status = 'FILLED'
+        AND created_at >= %s
+        ORDER BY created_at ASC
+        LIMIT 1
+        '''
+        
+        first_buy_result = execute_query(first_buy_query, (symbol, cycle_created_at), fetch_one=True)
+        
+        if first_buy_result:
+            first_buy_price = Decimal(str(first_buy_result['first_buy_price']))
+            first_buy_time = first_buy_result['first_buy_time']
+        else:
+            # Fallback to average price if no order found
+            first_buy_price = avg_price
+            first_buy_time = cycle_created_at
+        
+        # Calculate age since first buy order
+        if first_buy_time:
+            age_delta = datetime.now() - first_buy_time
+            days = age_delta.days
+            hours, remainder = divmod(age_delta.seconds, 3600)
+            minutes, _ = divmod(remainder, 60)
+            age_str = f"{days:02d}:{hours:02d}:{minutes:02d}"
+        else:
+            age_str = "N/A"
         
         # Get current price
         current_price = get_current_price(symbol, client)
@@ -429,11 +491,11 @@ def analyze_active_cycles_detail():
                 'symbol': symbol,
                 'status': status,
                 'quantity': format_number(quantity, decimal_places=6),
-                'avg_price': format_number(avg_price, is_currency=True),
                 'safety_orders': safety_orders,
-                'latest_time': time_str,
+                'first_buy_price': format_number(first_buy_price, is_currency=True),
+                'avg_price': format_number(avg_price, is_currency=True),
                 'last_fill': format_number(last_fill_price, is_currency=True) if last_fill_price else 'N/A',
-                'highest_trail': format_number(highest_trailing, is_currency=True) if highest_trailing else 'N/A',
+                'age': age_str,
                 'current_value': format_number(current_value, is_currency=True),
                 'pl_pct': f'{unrealized_pct:+.2f}%',
                 'tech_rating': tech_rating,
@@ -446,11 +508,11 @@ def analyze_active_cycles_detail():
                 'symbol': symbol,
                 'status': status,
                 'quantity': format_number(quantity, decimal_places=6),
-                'avg_price': format_number(avg_price, is_currency=True),
                 'safety_orders': safety_orders,
-                'latest_time': time_str,
+                'first_buy_price': format_number(first_buy_price, is_currency=True),
+                'avg_price': format_number(avg_price, is_currency=True),
                 'last_fill': format_number(last_fill_price, is_currency=True) if last_fill_price else 'N/A',
-                'highest_trail': format_number(highest_trailing, is_currency=True) if highest_trailing else 'N/A',
+                'age': age_str,
                 'current_value': 'N/A',
                 'pl_pct': 'N/A',
                 'tech_rating': tech_rating,
@@ -461,8 +523,8 @@ def analyze_active_cycles_detail():
     # Sort by P/L % (highest to lowest)
     cycle_data.sort(key=lambda x: x['unrealized_pct'], reverse=True)
     
-    # Prepare grid data
-    headers = ['Asset', 'Status', 'Quantity', 'Avg Price', 'Safety Orders', 'Latest Order', 'Last Fill', 'Highest Trail', 'Current Value', 'P/L %', 'Tech Rating', 'Trend']
+    # Prepare grid data with updated headers
+    headers = ['Asset', 'Status', 'Quantity', 'SOs', 'Buy Order $', 'Avg Price', 'Last Fill', 'Age (D:H:M)', 'Current Value', 'P/L %', 'Tech Rating', 'Trend']
     rows = []
     
     for cycle in cycle_data:
@@ -470,11 +532,11 @@ def analyze_active_cycles_detail():
             cycle['symbol'],
             cycle['status'],
             cycle['quantity'],
-            cycle['avg_price'],
             cycle['safety_orders'],
-            cycle['latest_time'],
+            cycle['first_buy_price'],
+            cycle['avg_price'],
             cycle['last_fill'],
-            cycle['highest_trail'],
+            cycle['age'],
             cycle['current_value'],
             cycle['pl_pct'],
             cycle['tech_rating'],
@@ -743,63 +805,10 @@ def analyze_market_sentiment():
     print(f'   Bullish Positions: {colored(str(len(bullish_assets)), Colors.GREEN)} ({len(bullish_assets)/len(sentiment_data)*100:.0f}%)')
     print(f'   Neutral Positions: {colored(str(len(neutral_assets)), Colors.YELLOW)} ({len(neutral_assets)/len(sentiment_data)*100:.0f}%)')
     print(f'   Bearish Positions: {colored(str(len(bearish_assets)), Colors.RED)} ({len(bearish_assets)/len(sentiment_data)*100:.0f}%)')
-    
-    # Enhanced market interpretation
-    print(f'\n{colored("🎯 PORTFOLIO INTERPRETATION:", Colors.CYAN + Colors.BOLD)}')
-    
-    # Combine multiple factors for interpretation
-    if avg_recommend_all > 0.2 and avg_rsi < 70:
-        interpretation = "Strong bullish momentum across your positions. Favorable environment for holding/adding."
-        interp_color = Colors.GREEN
-    elif avg_recommend_all > 0.1 and avg_rsi < 65:
-        interpretation = "Moderate bullish sentiment in your portfolio. Selective opportunities available."
-        interp_color = Colors.GREEN
-    elif avg_recommend_all > -0.1 and 40 < avg_rsi < 60:
-        interpretation = "Balanced portfolio sentiment. Good for range trading and waiting for clear direction."
-        interp_color = Colors.YELLOW
-    elif avg_recommend_all < -0.1 and avg_rsi > 30:
-        interpretation = "Bearish sentiment across your positions. Consider defensive positioning."
-        interp_color = Colors.RED
-    elif avg_recommend_all < -0.2 and avg_rsi < 40:
-        interpretation = "Bearish momentum with potential oversold conditions. Watch for reversal signals."
-        interp_color = Colors.RED
-    else:
-        interpretation = "Mixed signals across your portfolio. Exercise caution and wait for clarity."
-        interp_color = Colors.YELLOW
-    
-    print(f'   {colored(interpretation, interp_color)}')
-    
-    # Risk assessment based on multiple factors
-    volatility_risk = "HIGH" if avg_adx > 30 else "MEDIUM" if avg_adx > 20 else "LOW"
-    sentiment_risk = "HIGH" if abs(avg_recommend_all) > 0.4 else "MEDIUM" if abs(avg_recommend_all) > 0.2 else "LOW"
-    
-    overall_risk = "HIGH" if volatility_risk == "HIGH" or sentiment_risk == "HIGH" else "MEDIUM" if volatility_risk == "MEDIUM" or sentiment_risk == "MEDIUM" else "LOW"
-    risk_color = Colors.RED if overall_risk == "HIGH" else Colors.YELLOW if overall_risk == "MEDIUM" else Colors.GREEN
-    
-    print(f'   Portfolio Risk Level: {colored(overall_risk, risk_color)} (Volatility: {volatility_risk}, Sentiment: {sentiment_risk})')
-    
-    # Portfolio-specific advice
-    bullish_pct = len(bullish_assets) / len(sentiment_data) * 100
-    bearish_pct = len(bearish_assets) / len(sentiment_data) * 100
-    
-    print(f'\n{colored("💡 PORTFOLIO STRATEGY SUGGESTION:", Colors.CYAN + Colors.BOLD)}')
-    if bullish_pct >= 60:
-        suggestion = "Strong bullish portfolio. Consider holding positions and potentially adding to strongest performers."
-        sugg_color = Colors.GREEN
-    elif bullish_pct >= 40:
-        suggestion = "Mixed but leaning bullish. Focus on your strongest positions and be selective with new entries."
-        sugg_color = Colors.YELLOW
-    elif bearish_pct >= 60:
-        suggestion = "Predominantly bearish portfolio. Consider reducing position sizes or taking profits on any strength."
-        sugg_color = Colors.RED
-    else:
-        suggestion = "Balanced portfolio with mixed signals. Maintain current positions and wait for clearer trends."
-        sugg_color = Colors.BLUE
-    
-    print(f'   {colored(suggestion, sugg_color)}')
 
 def main():
     """Main analysis function"""
+    print()  # Empty line for spacing after command prompt
     print(f'{colored("🤖 DCA TRADING BOT - P/L ANALYSIS", Colors.HEADER + Colors.BOLD)}')
     print(colored('=' * 50, Colors.HEADER))
     
@@ -830,6 +839,25 @@ def main():
         # Color code realized P/L
         realized_color = Colors.GREEN if realized_pl >= 0 else Colors.RED
         print(f'💰 Realized P/L (Completed): {colored(format_number(realized_pl, is_currency=True), realized_color)}')
+        
+        # Calculate and display ROI for overall summary
+        # Get total historical investment for ROI calculation
+        historical_query = """
+        SELECT 
+            SUM(c.quantity * c.average_purchase_price) as total_historical_investment
+        FROM dca_cycles c
+        WHERE c.status = 'complete' AND c.completed_at IS NOT NULL
+        """
+        historical_result = execute_query(historical_query, fetch_one=True)
+        total_historical_investment = Decimal(str(historical_result['total_historical_investment'] or '0')) if historical_result else Decimal('0')
+        
+        if total_historical_investment > 0:
+            roi_percent = (realized_pl / total_historical_investment) * 100
+            roi_color = Colors.GREEN if roi_percent >= 0 else Colors.RED
+            print(f'📈 ROI: {colored(f"{roi_percent:+.2f}%", roi_color)}')
+        else:
+            print(f'📈 ROI: {colored("N/A", Colors.YELLOW)}')
+        
         print(f'💵 Active Investment: {colored(format_number(active_invested, is_currency=True), Colors.BLUE)}')
         print(f'📋 Completed Cycles: {colored(str(completed_cycles), Colors.BLUE)}')
         

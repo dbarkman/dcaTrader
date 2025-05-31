@@ -4118,9 +4118,12 @@ def main():
             print("="*60)
             results['caretaker_asset_caretaker'] = test_integration_asset_caretaker_scenarios()
         
-        if args.test == 'watchdog' or args.test == 'caretakers' or args.test == 'all':
+        if args.test == 'watchdog':
             print("\n" + "="*60)
             print("🧪 CARETAKER SCRIPT: Watchdog Integration Test")
+            print("="*60)
+            print("⚠️  WARNING: This test will interact with running main_app processes!")
+            print("⚠️  Only run this test when you understand the implications.")
             print("="*60)
             results['caretaker_watchdog'] = test_integration_watchdog_scenarios()
         
@@ -4189,8 +4192,8 @@ Caretaker Script Tests (Phase 3 - Script Integration):
 
 Combined:
   scenarios       : All 10 DCA scenario tests
-  caretakers      : All caretaker script tests (order_manager + cooldown_manager)
-  all             : Run WebSocket tests + DCA scenarios + caretaker tests (14 tests total)
+  caretakers      : All caretaker script tests (excludes watchdog for safety)
+  all             : Run WebSocket tests + DCA scenarios + caretaker tests (excludes watchdog)
 
 Usage:
   python integration_test.py                           # Run all tests (14 total)

@@ -171,10 +171,6 @@ def create_trading_embed(
         timestamp=datetime.now(timezone.utc).isoformat()
     )
     
-    # Add trading mode indicator
-    trading_mode = "📋 Paper Trading" if config.is_paper_trading else "🔴 LIVE TRADING"
-    embed.add_embed_field(name="Trading Mode", value=trading_mode, inline=True)
-    
     # Add details as fields
     for key, value in details.items():
         # Format field name (capitalize and replace underscores)

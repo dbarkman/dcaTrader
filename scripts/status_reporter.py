@@ -144,8 +144,8 @@ def send_status_alert() -> bool:
         # Create status alert details
         status_details = {
             'Total Realized P/L': f"{pl_status} {pl_display}",
-            'Total Amount Invested': total_invested_display,
             'Currently Invested': current_invested_display,
+            'Total Amount Invested': total_invested_display,
             'ROI': roi_display,
             'Active Cycles': metrics['active_cycles'],
             'Completed Cycles': metrics['completed_cycles']
