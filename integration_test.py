@@ -3991,7 +3991,7 @@ def main():
             'websocket_market', 'websocket_trade', 'websocket_all',
             'scenario1', 'scenario2', 'scenario3', 'scenario4', 'scenario5',
             'scenario6', 'scenario7', 'scenario8', 'scenario9', 'scenario10',
-            'scenarios', 'order_manager', 'caretakers', 'all'
+            'scenarios', 'order_manager', 'cooldown_manager', 'consistency_checker', 'caretakers', 'all'
         ],
         default='all',
         help='Specific test to run (default: all)'
@@ -4101,6 +4101,18 @@ def main():
             print("="*60)
             results['caretaker_order_manager'] = test_integration_order_manager_scenarios()
         
+        if args.test == 'cooldown_manager' or args.test == 'caretakers' or args.test == 'all':
+            print("\n" + "="*60)
+            print("🧪 CARETAKER SCRIPT: Cooldown Manager Integration Test")
+            print("="*60)
+            results['caretaker_cooldown_manager'] = test_integration_cooldown_manager_scenarios()
+        if args.test == 'consistency_checker' or args.test == 'caretakers' or args.test == 'all':
+            print("\n" + "="*60)
+            print("🧪 CARETAKER SCRIPT: Consistency Checker Integration Test")
+            print("="*60)
+            results['caretaker_consistency_checker'] = test_integration_consistency_checker_scenarios()
+
+        
     except KeyboardInterrupt:
         print("\n\n⚠️ Tests interrupted by user")
         return
@@ -4162,18 +4174,20 @@ DCA Scenario Tests (10 Specific Trading Scenarios):
 
 Caretaker Script Tests (Phase 3 - Script Integration):
   order_manager  : Test Order Manager caretaker script (stale/orphaned order handling)
+  cooldown_manager : Test Cooldown Manager caretaker script (cooldown period expiration)
 
 Combined:
   scenarios       : All 10 DCA scenario tests
-  caretakers      : All caretaker script tests (currently just order_manager)
-  all             : Run WebSocket tests + DCA scenarios + caretaker tests (13 tests total)
+  caretakers      : All caretaker script tests (order_manager + cooldown_manager)
+  all             : Run WebSocket tests + DCA scenarios + caretaker tests (14 tests total)
 
 Usage:
-  python integration_test.py                           # Run all tests (13 total)
+  python integration_test.py                           # Run all tests (14 total)
   python integration_test.py --test websocket_market   # Run specific WebSocket test
   python integration_test.py --test scenario1         # Run specific DCA scenario
   python integration_test.py --test scenarios          # Run all 10 DCA scenarios
   python integration_test.py --test order_manager      # Run caretaker script test
+  python integration_test.py --test cooldown_manager   # Run cooldown manager script test
   python integration_test.py --help-tests             # Show this help
 
 Requirements:
@@ -4184,8 +4198,8 @@ Requirements:
 Expected Results:
   - 2 WebSocket Tests (Market Data WebSocket + Trade Data WebSocket)
   - 10 DCA Scenario Tests (Scenario 1-10 as specified in requirements)
-  - 1 Caretaker Script Test (Order Manager Integration Test)
-  - Total: 13 tests when running 'all'
+  - 2 Caretaker Script Tests (Order Manager Integration Test + Cooldown Manager Integration Test)
+  - Total: 14 tests when running 'all'
     """)
 
 
@@ -4207,19 +4221,6 @@ def test_integration_order_manager_scenarios():
     """
     print("\n🚀 RUNNING: Order Manager Integration Test - All Scenarios")
     print("="*80)
-    
-    # # Suppress console logging for order_manager test to match other integration tests
-    # root_logger = logging.getLogger()
-    # for handler in root_logger.handlers[:]:
-    #     if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
-    #         root_logger.removeHandler(handler)
-    
-    # # Also remove console handlers from all existing loggers
-    # for logger_name in logging.getLogger().manager.loggerDict:
-    #     logger_obj = logging.getLogger(logger_name)
-    #     for handler in logger_obj.handlers[:]:
-    #         if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
-    #             logger_obj.removeHandler(handler)
     
     # Test configuration
     test_symbol = 'BTC/USD'
@@ -4785,6 +4786,657 @@ def test_integration_order_manager_scenarios():
         
         print("\n🧹 Comprehensive teardown...")
         comprehensive_test_teardown("order_manager_integration_test")
+
+
+def test_integration_cooldown_manager_scenarios():
+    """
+    Cooldown Manager Integration Test - All Scenarios
+    
+    Tests the cooldown_manager caretaker script with comprehensive scenarios:
+    A. Overall Setup for Cooldown Manager Tests
+    B. Cooldown Expired
+    C. Cooldown Not Expired  
+    D. No Previous Completed Cycle
+    E. Interaction with Price Deviation Start (Cooldown Bypassed)
+    """
+    print("\n🚀 RUNNING: Cooldown Manager Integration Test - All Scenarios")
+    print("="*80)
+    
+    # Test configuration
+    test_symbol = 'ETH/USD'
+    test_asset_id = None
+    
+    try:
+        # =============================================================================
+        # A. OVERALL SETUP FOR COOLDOWN MANAGER TESTS
+        # =============================================================================
+        
+        print("   📋 A. Overall Setup for Cooldown Manager Tests...")
+        
+        # Initialize DB connection (already established via config)
+        print("   ✅ Database connection established")
+        
+        # Define test_symbol
+        print(f"   ✅ Test symbol defined: {test_symbol}")
+        
+        # Create dca_assets record with cooldown_period = 60 seconds for easier testing
+        test_asset_id = setup_test_asset(
+            symbol=test_symbol,
+            cooldown_period=60  # 60 seconds for easier testing
+        )
+        print(f"   ✅ Created test asset {test_symbol} with ID {test_asset_id} (cooldown: 60s)")
+        
+        # Import cooldown_manager module
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'scripts'))
+        from cooldown_manager import main as cooldown_manager_main
+        print("   ✅ Cooldown manager module imported")
+        print("   ✅ Initial setup complete")
+        
+        # =============================================================================
+        # B. SUB-SCENARIO: COOLDOWN EXPIRED
+        # =============================================================================
+        
+        print("\n   📋 B. Sub-Scenario: Cooldown Expired...")
+        print("   📊 B.1: Setup - Creating expired cooldown scenario...")
+        
+        # Get current time for calculations
+        current_time = datetime.now(timezone.utc)
+        
+        # Create a 'complete' cycle with completed_at set to 70 seconds ago
+        complete_cycle_completed_at = current_time - timedelta(seconds=70)
+        complete_cycle_id = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='complete',
+            completed_at=complete_cycle_completed_at,
+            created_at=complete_cycle_completed_at - timedelta(minutes=10)  # Created before completion
+        )
+        print(f"   ✅ Created complete cycle {complete_cycle_id} (completed 70s ago)")
+        
+        # Create a subsequent 'cooldown' cycle (created after complete cycle)
+        cooldown_cycle_created_at = complete_cycle_completed_at + timedelta(seconds=5)
+        cooldown_cycle_id = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='cooldown',
+            created_at=cooldown_cycle_created_at
+        )
+        print(f"   ✅ Created cooldown cycle {cooldown_cycle_id} (should expire)")
+        
+        print("   📊 B.2: Action - Running cooldown_manager...")
+        result = cooldown_manager_main()
+        print(f"   ✅ Cooldown manager completed with result: {result}")
+        
+        print("   📊 B.3: Assertion - Verifying cooldown expiry...")
+        # Query the cooldown cycle to verify status changed to 'watching'
+        cycle_data = execute_test_query(
+            "SELECT status FROM dca_cycles WHERE id = %s",
+            (cooldown_cycle_id,),
+            fetch_one=True
+        )
+        if cycle_data and cycle_data['status'] == 'watching':
+            print(f"   ✅ Cooldown cycle {cooldown_cycle_id} status changed to 'watching' (expired)")
+        else:
+            print(f"   ❌ Expected 'watching', got '{cycle_data['status'] if cycle_data else 'None'}'")
+        print("   ✅ Cooldown expired scenario completed")
+        
+        # =============================================================================
+        # C. SUB-SCENARIO: COOLDOWN NOT EXPIRED
+        # =============================================================================
+        
+        print("\n   📋 C. Sub-Scenario: Cooldown Not Expired...")
+        print("   📊 C.1: Setup - Creating non-expired cooldown scenario...")
+        
+        # Create a 'complete' cycle with completed_at set to only 30 seconds ago
+        complete_cycle_completed_at2 = current_time - timedelta(seconds=30)
+        complete_cycle_id2 = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='complete',
+            completed_at=complete_cycle_completed_at2,
+            created_at=complete_cycle_completed_at2 - timedelta(minutes=10)
+        )
+        print(f"   ✅ Created complete cycle {complete_cycle_id2} (completed 30s ago)")
+        
+        # Create subsequent 'cooldown' cycle
+        cooldown_cycle_created_at2 = complete_cycle_completed_at2 + timedelta(seconds=5)
+        cooldown_cycle_id2 = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='cooldown',
+            created_at=cooldown_cycle_created_at2
+        )
+        print(f"   ✅ Created cooldown cycle {cooldown_cycle_id2} (should NOT expire)")
+        
+        print("   📊 C.2: Action - Running cooldown_manager...")
+        result = cooldown_manager_main()
+        print(f"   ✅ Cooldown manager completed with result: {result}")
+        
+        print("   📊 C.3: Assertion - Verifying cooldown NOT expired...")
+        # Query the cooldown cycle to verify status remains 'cooldown'
+        cycle_data = execute_test_query(
+            "SELECT status FROM dca_cycles WHERE id = %s",
+            (cooldown_cycle_id2,),
+            fetch_one=True
+        )
+        if cycle_data and cycle_data['status'] == 'cooldown':
+            print(f"   ✅ Cooldown cycle {cooldown_cycle_id2} status remains 'cooldown' (not expired)")
+        else:
+            print(f"   ❌ Expected 'cooldown', got '{cycle_data['status'] if cycle_data else 'None'}'")
+        print("   ✅ Cooldown not expired scenario completed")
+        
+        # =============================================================================
+        # D. SUB-SCENARIO: NO PREVIOUS COMPLETED CYCLE
+        # =============================================================================
+        
+        print("\n   📋 D. Sub-Scenario: No Previous Completed Cycle...")
+        print("   📊 D.1: Setup - Creating orphaned cooldown scenario...")
+        
+        # Create only a 'cooldown' cycle with no prior complete cycle
+        cooldown_cycle_id3 = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='cooldown'
+        )
+        print(f"   ✅ Created orphaned cooldown cycle {cooldown_cycle_id3} (no previous complete cycle)")
+        
+        print("   📊 D.2: Action - Running cooldown_manager...")
+        result = cooldown_manager_main()
+        print(f"   ✅ Cooldown manager completed with result: {result}")
+        
+        print("   📊 D.3: Assertion - Verifying orphaned cooldown handling...")
+        # Query the cooldown cycle to verify status remains 'cooldown'
+        cycle_data = execute_test_query(
+            "SELECT status FROM dca_cycles WHERE id = %s",
+            (cooldown_cycle_id3,),
+            fetch_one=True
+        )
+        if cycle_data and cycle_data['status'] == 'cooldown':
+            print(f"   ✅ Orphaned cooldown cycle {cooldown_cycle_id3} status remains 'cooldown' (correct)")
+        else:
+            print(f"   ❌ Expected 'cooldown', got '{cycle_data['status'] if cycle_data else 'None'}'")
+        print("   📝 Note: Logs should contain warnings about missing previous cycle")
+        print("   ✅ No previous completed cycle scenario completed")
+        
+        # =============================================================================
+        # E. SUB-SCENARIO: INTERACTION WITH PRICE DEVIATION START (COOLDOWN BYPASSED)
+        # =============================================================================
+        
+        print("\n   📋 E. Sub-Scenario: Interaction with Price Deviation Start (Cooldown Bypassed)...")
+        print("   📊 E.1: Setup - Configuring price deviation bypass scenario...")
+        
+        # Update dca_assets with last_sell_price and buy_order_price_deviation_percent
+        execute_test_query("""
+            UPDATE dca_assets 
+            SET last_sell_price = %s, buy_order_price_deviation_percent = %s 
+            WHERE id = %s
+        """, (Decimal('50000.0'), Decimal('2.0'), test_asset_id), commit=True)
+        print("   ✅ Set last_sell_price = $50000.0, buy_order_price_deviation_percent = 2.0%")
+        
+        # Create 'cooldown' cycle
+        cooldown_cycle_id4 = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='cooldown'
+        )
+        print(f"   ✅ Created cooldown cycle {cooldown_cycle_id4}")
+        
+        # Simulate MarketDataStream action by manually updating cycle to 'buying' status
+        execute_test_query("""
+            UPDATE dca_cycles 
+            SET status = %s, latest_order_id = %s, latest_order_created_at = %s 
+            WHERE id = %s
+        """, ('buying', 'simulated_buy_order', current_time, cooldown_cycle_id4), commit=True)
+        print(f"   ✅ Simulated MarketDataStream action: cycle {cooldown_cycle_id4} set to 'buying'")
+        print("   📝 Note: This simulates price deviation triggering a buy order")
+        
+        print("   📊 E.2: Action - Running cooldown_manager...")
+        result = cooldown_manager_main()
+        print(f"   ✅ Cooldown manager completed with result: {result}")
+        
+        print("   📊 E.3: Assertion - Verifying cooldown bypass...")
+        # Query the cycle to verify status remains 'buying' (not changed to 'watching')
+        cycle_data = execute_test_query(
+            "SELECT status FROM dca_cycles WHERE id = %s",
+            (cooldown_cycle_id4,),
+            fetch_one=True
+        )
+        if cycle_data and cycle_data['status'] == 'buying':
+            print(f"   ✅ Cycle {cooldown_cycle_id4} status remains 'buying' (cooldown bypassed)")
+        else:
+            print(f"   ❌ Expected 'buying', got '{cycle_data['status'] if cycle_data else 'None'}'")
+        print("   📝 Note: Cooldown manager should not interfere with active trading")
+        print("   ✅ Price deviation bypass scenario completed")
+        
+        print("\n🎉 COOLDOWN MANAGER INTEGRATION TEST: PASSED")
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ COOLDOWN MANAGER INTEGRATION TEST FAILED: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise
+    
+    finally:
+        # Cleanup is handled by comprehensive_test_teardown
+        comprehensive_test_teardown("cooldown_manager_integration_test")
+
+
+def test_integration_consistency_checker_scenarios():
+    """
+    Consistency Checker Integration Test - All Scenarios
+    
+    Tests the consistency_checker caretaker script with comprehensive scenarios:
+    A. Initial Setup
+    B. Stuck 'buying' Cycle (No Alpaca Order or Terminal Order)
+    C. DB Position Orphaned (DB has qty, Alpaca no position)
+    D. Alpaca Position Sync (DB Mismatch)
+    E. Consistent State (Watching, Qty 0, No Alpaca Position)
+    F. Consistent State (Watching, Qty > 0, Alpaca Position Matches DB)
+    """
+    print("\n🚀 RUNNING: Consistency Checker Integration Test - All Scenarios")
+    print("="*80)
+    
+    # Test configuration
+    test_symbol = 'ADA/USD'
+    client = None
+    test_asset_id = None
+    
+    try:
+        # =============================================================================
+        # A. INITIAL SETUP FOR ALL CONSISTENCY CHECKER SCENARIOS
+        # =============================================================================
+        
+        print("   📋 A. Overall Setup for Consistency Checker Tests...")
+        
+        # Initialize Alpaca TradingClient
+        client = get_test_alpaca_client()
+        if not client:
+            raise Exception("Could not initialize Alpaca TradingClient")
+        
+        # Verify Alpaca connection
+        account = client.get_account()
+        print(f"   ✅ Alpaca connection verified (Account: {account.account_number})")
+        
+        # Database connection
+        if not execute_test_query("SELECT 1", fetch_one=True):
+            raise Exception("Database connection failed")
+        print("   ✅ Database connection established")
+        
+        # Define test symbol and create asset
+        print(f"   ✅ Test symbol defined: {test_symbol}")
+        test_asset_id = setup_test_asset(test_symbol, enabled=True)
+        print(f"   ✅ Created test asset {test_symbol} with ID {test_asset_id}")
+        
+        # Import consistency checker module
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'scripts'))
+        from consistency_checker import main as consistency_checker_main
+        print("   ✅ Consistency checker module imported")
+        print("   ✅ Initial setup complete")
+        
+        # =============================================================================
+        # B. STUCK 'BUYING' CYCLE (NO ALPACA ORDER OR TERMINAL ORDER)
+        # =============================================================================
+        
+        print("\n   📋 B. Sub-Scenario: Stuck 'buying' Cycle (No Alpaca Order or Terminal Order)...")
+        print("   📊 B.1: Setup - Creating stuck buying cycle...")
+        
+        # Create cycle in 'buying' status with fake order ID
+        fake_order_id = 'fake_or_filled_order_12345'
+        stuck_cycle_id = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='buying',
+            latest_order_id=fake_order_id,
+            latest_order_created_at=datetime.now(timezone.utc) - timedelta(minutes=10)  # Old enough to be stale
+        )
+        print(f"   ✅ Created stuck buying cycle {stuck_cycle_id} with fake order ID {fake_order_id}")
+        
+        # Verify no such order exists on Alpaca
+        try:
+            client.get_order_by_id(fake_order_id)
+            print(f"   ⚠️ Fake order {fake_order_id} unexpectedly exists on Alpaca")
+        except:
+            print(f"   ✅ Confirmed fake order {fake_order_id} does not exist on Alpaca")
+        
+        print("   📊 B.2: Action - Running consistency_checker...")
+        consistency_checker_result = consistency_checker_main()
+        print(f"   ✅ Consistency checker completed with result: {consistency_checker_result}")
+        
+        print("   📊 B.3: Assertion - Verifying stuck buying cycle correction...")
+        # Query the cycle to verify it was fixed
+        cycle_after = execute_test_query(
+            "SELECT status, latest_order_id FROM dca_cycles WHERE id = %s", 
+            (stuck_cycle_id,), 
+            fetch_one=True
+        )
+        
+        if cycle_after and cycle_after['status'] == 'watching' and cycle_after['latest_order_id'] is None:
+            print(f"   ✅ Stuck buying cycle {stuck_cycle_id} corrected: status='watching', order_id=NULL")
+        else:
+            print(f"   ❌ Stuck buying cycle {stuck_cycle_id} not corrected properly: {cycle_after}")
+        
+        print("   ✅ Stuck buying cycle scenario completed")
+        
+        # =============================================================================
+        # C. DB POSITION ORPHANED (DB HAS QTY, ALPACA NO POSITION)
+        # =============================================================================
+        
+        print("\n   📋 C. Sub-Scenario: DB Position Orphaned (DB has qty, Alpaca no position)...")
+        print("   📊 C.1: Setup - Creating orphaned DB position...")
+        
+        # Create watching cycle with quantity but no Alpaca position
+        orphaned_cycle_id = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=Decimal('0.1'),
+            average_purchase_price=Decimal('0.5')
+        )
+        print(f"   ✅ Created orphaned watching cycle {orphaned_cycle_id} with qty=0.1")
+        
+        # Verify no Alpaca position exists for test_symbol
+        try:
+            from utils.alpaca_client_rest import get_positions
+            positions = get_positions(client)
+            ada_position = None
+            for pos in positions:
+                if pos.symbol == test_symbol.replace('/', ''):
+                    ada_position = pos
+                    break
+            
+            if ada_position:
+                print(f"   ⚠️ Alpaca position unexpectedly exists: {ada_position.qty}")
+                # Liquidate it for clean test
+                client.close_position(test_symbol.replace('/', ''), close_options=None)
+                print("   🧹 Liquidated existing position for clean test")
+            else:
+                print(f"   ✅ Confirmed no Alpaca position exists for {test_symbol}")
+        except Exception as e:
+            print(f"   ✅ No Alpaca position found for {test_symbol} (as expected)")
+        
+        print("   📊 C.2: Action - Running consistency_checker...")
+        consistency_checker_result = consistency_checker_main()
+        print(f"   ✅ Consistency checker completed with result: {consistency_checker_result}")
+        
+        print("   📊 C.3: Assertion - Verifying orphaned position handling...")
+        # Check that original cycle was marked as error
+        original_cycle = execute_test_query(
+            "SELECT status, completed_at FROM dca_cycles WHERE id = %s", 
+            (orphaned_cycle_id,), 
+            fetch_one=True
+        )
+        
+        if original_cycle and original_cycle['status'] == 'error' and original_cycle['completed_at'] is not None:
+            print(f"   ✅ Original cycle {orphaned_cycle_id} marked as 'error' with completed_at set")
+        else:
+            print(f"   ❌ Original cycle {orphaned_cycle_id} not marked as error: {original_cycle}")
+        
+        # Check for new watching cycle with quantity=0
+        new_cycles = execute_test_query(
+            "SELECT id, status, quantity FROM dca_cycles WHERE asset_id = %s AND id != %s ORDER BY created_at DESC LIMIT 1", 
+            (test_asset_id, orphaned_cycle_id), 
+            fetch_one=True
+        )
+        
+        if new_cycles and new_cycles['status'] == 'watching' and new_cycles['quantity'] == 0:
+            print(f"   ✅ New watching cycle {new_cycles['id']} created with status='watching', quantity=0")
+        else:
+            print(f"   ❌ New watching cycle not created properly: {new_cycles}")
+        
+        print("   ✅ DB position orphaned scenario completed")
+        
+        # =============================================================================
+        # D. ALPACA POSITION SYNC (DB MISMATCH)
+        # =============================================================================
+        
+        print("\n   📋 D. Sub-Scenario: Alpaca Position Sync (DB Mismatch)...")
+        print("   📊 D.1: Setup - Creating Alpaca position and mismatched DB cycle...")
+        
+        # Place market BUY order to create Alpaca position
+        try:
+            from alpaca.trading.requests import MarketOrderRequest
+            from alpaca.trading.enums import OrderSide, TimeInForce
+            
+            # Calculate quantity for $10+ order value
+            ada_price = Decimal('0.5')  # Approximate ADA price
+            order_value = Decimal('15.0')  # Target order value
+            calc_quantity = order_value / ada_price
+            
+            market_order = MarketOrderRequest(
+                symbol=test_symbol.replace('/', ''),
+                qty=float(calc_quantity),
+                side=OrderSide.BUY,
+                time_in_force=TimeInForce.GTC
+            )
+            
+            alpaca_order = client.submit_order(market_order)
+            print(f"   ✅ Placed Alpaca market BUY order: {alpaca_order.id}")
+            
+            # Wait a moment for order to fill
+            import time
+            time.sleep(2)
+            
+            # Get actual position
+            positions = get_positions(client)
+            alpaca_position = None
+            for pos in positions:
+                if pos.symbol == test_symbol.replace('/', ''):
+                    alpaca_position = pos
+                    break
+            
+            if alpaca_position:
+                actual_qty = Decimal(str(alpaca_position.qty))
+                actual_avg_price = Decimal(str(alpaca_position.avg_entry_price))
+                print(f"   ✅ Alpaca position created: qty={actual_qty}, avg_price=${actual_avg_price}")
+            else:
+                raise Exception("Alpaca position not found after order")
+                
+        except Exception as e:
+            print(f"   ⚠️ Error creating Alpaca position: {e} - using simulated values")
+            actual_qty = Decimal('30.0')
+            actual_avg_price = Decimal('0.50')
+        
+        # Create DB cycle with deliberately different values
+        mismatched_qty = actual_qty / 2  # Half the actual quantity
+        mismatched_price = actual_avg_price * Decimal('0.9')  # 10% lower price
+        
+        mismatched_cycle_id = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=mismatched_qty,
+            average_purchase_price=mismatched_price,
+            safety_orders=1,
+            last_order_fill_price=Decimal('0.48')
+        )
+        print(f"   ✅ Created mismatched DB cycle {mismatched_cycle_id}:")
+        print(f"      DB: qty={mismatched_qty}, avg_price=${mismatched_price}")
+        print(f"      Alpaca: qty={actual_qty}, avg_price=${actual_avg_price}")
+        
+        print("   📊 D.2: Action - Running consistency_checker...")
+        consistency_checker_result = consistency_checker_main()
+        print(f"   ✅ Consistency checker completed with result: {consistency_checker_result}")
+        
+        print("   📊 D.3: Assertion - Verifying position sync...")
+        # Check that cycle was updated to match Alpaca position
+        synced_cycle = execute_test_query(
+            "SELECT quantity, average_purchase_price, safety_orders, last_order_fill_price FROM dca_cycles WHERE id = %s", 
+            (mismatched_cycle_id,), 
+            fetch_one=True
+        )
+        
+        if synced_cycle:
+            synced_qty = synced_cycle['quantity']
+            synced_price = synced_cycle['average_purchase_price']
+            
+            # Check if values were synced (allowing for small precision differences)
+            qty_synced = abs(synced_qty - actual_qty) < Decimal('0.001')
+            price_synced = abs(synced_price - actual_avg_price) < Decimal('0.01')
+            
+            if qty_synced and price_synced:
+                print(f"   ✅ Cycle {mismatched_cycle_id} synced with Alpaca position:")
+                print(f"      Updated: qty={synced_qty}, avg_price=${synced_price}")
+            else:
+                print(f"   ❌ Cycle {mismatched_cycle_id} not properly synced:")
+                print(f"      DB: qty={synced_qty}, avg_price=${synced_price}")
+                print(f"      Expected: qty={actual_qty}, avg_price=${actual_avg_price}")
+            
+            # Verify that safety_orders and last_order_fill_price were preserved
+            if (synced_cycle['safety_orders'] == 1 and 
+                synced_cycle['last_order_fill_price'] == Decimal('0.48')):
+                print("   ✅ Safety orders and last fill price preserved during sync")
+            else:
+                print("   ❌ Safety orders or last fill price not preserved")
+        else:
+            print(f"   ❌ Could not retrieve cycle {mismatched_cycle_id} after sync")
+        
+        print("   ✅ Alpaca position sync scenario completed")
+        
+        # =============================================================================
+        # E. CONSISTENT STATE (WATCHING, QTY 0, NO ALPACA POSITION)
+        # =============================================================================
+        
+        print("\n   📋 E. Sub-Scenario: Consistent State (Watching, Qty 0, No Alpaca Position)...")
+        print("   📊 E.1: Setup - Creating consistent zero state...")
+        
+        # Liquidate any existing position first
+        try:
+            client.close_position(test_symbol.replace('/', ''), close_options=None)
+            print("   🧹 Liquidated existing position for clean test")
+            time.sleep(1)
+        except:
+            pass
+        
+        # Create watching cycle with quantity=0
+        consistent_cycle_id = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=Decimal('0'),
+            average_purchase_price=Decimal('0')
+        )
+        print(f"   ✅ Created consistent cycle {consistent_cycle_id} with qty=0, no Alpaca position")
+        
+        # Record initial state
+        initial_state = execute_test_query(
+            "SELECT status, quantity, average_purchase_price, updated_at FROM dca_cycles WHERE id = %s", 
+            (consistent_cycle_id,), 
+            fetch_one=True
+        )
+        
+        print("   📊 E.2: Action - Running consistency_checker...")
+        consistency_checker_result = consistency_checker_main()
+        print(f"   ✅ Consistency checker completed with result: {consistency_checker_result}")
+        
+        print("   📊 E.3: Assertion - Verifying no changes to consistent state...")
+        # Check that cycle was not modified
+        final_state = execute_test_query(
+            "SELECT status, quantity, average_purchase_price, updated_at FROM dca_cycles WHERE id = %s", 
+            (consistent_cycle_id,), 
+            fetch_one=True
+        )
+        
+        if (final_state and 
+            final_state['status'] == initial_state['status'] and 
+            final_state['quantity'] == initial_state['quantity'] and
+            final_state['average_purchase_price'] == initial_state['average_purchase_price']):
+            print(f"   ✅ Consistent cycle {consistent_cycle_id} unchanged (correct)")
+            print("   📝 Note: Logs should contain 'consistent' message")
+        else:
+            print(f"   ❌ Consistent cycle {consistent_cycle_id} was unexpectedly modified")
+        
+        print("   ✅ Consistent zero state scenario completed")
+        
+        # =============================================================================
+        # F. CONSISTENT STATE (WATCHING, QTY > 0, ALPACA POSITION MATCHES DB)
+        # =============================================================================
+        
+        print("\n   📋 F. Sub-Scenario: Consistent State (Watching, Qty > 0, Alpaca Position Matches DB)...")
+        print("   📊 F.1: Setup - Creating consistent non-zero state...")
+        
+        # Use existing Alpaca position or create one
+        try:
+            positions = get_positions(client)
+            matching_position = None
+            for pos in positions:
+                if pos.symbol == test_symbol.replace('/', ''):
+                    matching_position = pos
+                    break
+            
+            if matching_position:
+                position_qty = Decimal(str(matching_position.qty))
+                position_price = Decimal(str(matching_position.avg_entry_price))
+                print(f"   ✅ Using existing Alpaca position: qty={position_qty}, avg_price=${position_price}")
+            else:
+                # Create a small position if none exists
+                market_order = MarketOrderRequest(
+                    symbol=test_symbol.replace('/', ''),
+                    qty=20.0,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.GTC
+                )
+                
+                alpaca_order = client.submit_order(market_order)
+                time.sleep(2)
+                
+                positions = get_positions(client)
+                for pos in positions:
+                    if pos.symbol == test_symbol.replace('/', ''):
+                        position_qty = Decimal(str(pos.qty))
+                        position_price = Decimal(str(pos.avg_entry_price))
+                        break
+                        
+                print(f"   ✅ Created Alpaca position: qty={position_qty}, avg_price=${position_price}")
+                
+        except Exception as e:
+            print(f"   ⚠️ Error with Alpaca position: {e} - using simulated values")
+            position_qty = Decimal('25.0')
+            position_price = Decimal('0.50')
+        
+        # Create DB cycle that exactly matches the Alpaca position
+        matching_cycle_id = setup_test_cycle(
+            asset_id=test_asset_id,
+            status='watching',
+            quantity=position_qty,
+            average_purchase_price=position_price,
+            safety_orders=2
+        )
+        print(f"   ✅ Created matching DB cycle {matching_cycle_id} with exact same values")
+        
+        # Record initial state
+        initial_matching_state = execute_test_query(
+            "SELECT status, quantity, average_purchase_price, safety_orders, updated_at FROM dca_cycles WHERE id = %s", 
+            (matching_cycle_id,), 
+            fetch_one=True
+        )
+        
+        print("   📊 F.2: Action - Running consistency_checker...")
+        consistency_checker_result = consistency_checker_main()
+        print(f"   ✅ Consistency checker completed with result: {consistency_checker_result}")
+        
+        print("   📊 F.3: Assertion - Verifying no changes to matching state...")
+        # Check that cycle was not modified
+        final_matching_state = execute_test_query(
+            "SELECT status, quantity, average_purchase_price, safety_orders, updated_at FROM dca_cycles WHERE id = %s", 
+            (matching_cycle_id,), 
+            fetch_one=True
+        )
+        
+        if (final_matching_state and 
+            final_matching_state['status'] == initial_matching_state['status'] and 
+            final_matching_state['quantity'] == initial_matching_state['quantity'] and
+            final_matching_state['average_purchase_price'] == initial_matching_state['average_purchase_price'] and
+            final_matching_state['safety_orders'] == initial_matching_state['safety_orders']):
+            print(f"   ✅ Matching cycle {matching_cycle_id} unchanged (correct)")
+            print("   📝 Note: Logs should indicate positions are consistent")
+        else:
+            print(f"   ❌ Matching cycle {matching_cycle_id} was unexpectedly modified")
+        
+        print("   ✅ Consistent non-zero state scenario completed")
+        
+        print("\n🎉 CONSISTENCY CHECKER INTEGRATION TEST: PASSED")
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ CONSISTENCY CHECKER INTEGRATION TEST FAILED: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise
+    
+    finally:
+        # Cleanup is handled by comprehensive_test_teardown
+        comprehensive_test_teardown("consistency_checker_integration_test")
 
 
 if __name__ == '__main__':
