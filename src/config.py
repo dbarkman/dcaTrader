@@ -167,6 +167,30 @@ class Config:
         return self._get_bool_env('TRADING_ALERTS_ENABLED', True)
     
     # =============================================================================
+    # DISCORD WEBHOOK CONFIGURATION
+    # =============================================================================
+    
+    @property
+    def discord_webhook_url(self) -> Optional[str]:
+        """Discord webhook URL for notifications."""
+        return os.getenv('DISCORD_WEBHOOK_URL')
+    
+    @property
+    def discord_user_id(self) -> Optional[str]:
+        """Discord user ID for mentions (optional)."""
+        return os.getenv('DISCORD_USER_ID')
+    
+    @property
+    def discord_notifications_enabled(self) -> bool:
+        """True if Discord notifications are enabled and configured."""
+        return bool(self.discord_webhook_url and self._get_bool_env('DISCORD_NOTIFICATIONS_ENABLED', False))
+    
+    @property
+    def discord_trading_alerts_enabled(self) -> bool:
+        """True if Discord trading alerts should be sent (separate from system alerts)."""
+        return self.discord_notifications_enabled and self._get_bool_env('DISCORD_TRADING_ALERTS_ENABLED', True)
+    
+    # =============================================================================
     # LOGGING CONFIGURATION
     # =============================================================================
     
@@ -258,9 +282,10 @@ class Config:
         logger.info(f"Testing Mode: {self.testing_mode}")
         logger.info(f"Dry Run Mode: {self.dry_run_mode}")
         logger.info(f"Email Alerts: {'Enabled' if self.email_alerts_enabled else 'Disabled'}")
+        logger.info(f"Discord Alerts: {'Enabled' if self.discord_notifications_enabled else 'Disabled'}")
         logger.info(f"Log Level: {self.log_level}")
         logger.info(f"Log Directory: {self.log_dir}")
-        logger.info("=====================================")
+        logger.info("======================================")
 
 
 # Global configuration instance
