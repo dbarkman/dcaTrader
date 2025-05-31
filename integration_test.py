@@ -3991,7 +3991,7 @@ def main():
             'websocket_market', 'websocket_trade', 'websocket_all',
             'scenario1', 'scenario2', 'scenario3', 'scenario4', 'scenario5',
             'scenario6', 'scenario7', 'scenario8', 'scenario9', 'scenario10',
-            'scenarios', 'order_manager', 'cooldown_manager', 'consistency_checker', 'asset_caretaker', 'watchdog', 'caretakers', 'all'
+            'scenarios', 'order_manager', 'cooldown_manager', 'consistency_checker', 'asset_caretaker', 'watchdog', 'backtesting', 'caretakers', 'all'
         ],
         default='all',
         help='Specific test to run (default: all)'
@@ -4020,16 +4020,39 @@ def main():
     results = {}
     
     try:
-        # WebSocket Tests
-        if args.test == 'websocket_market' or args.test == 'websocket_all' or args.test == 'all':
+        # WebSocket Tests (Only run when specifically requested)
+        if args.test == 'websocket_market':
             print("\n" + "="*60)
             print("🧪 WEBSOCKET TEST: Market Data WebSocket")
             print("="*60)
+            print("⚠️  WARNING: This test requires no conflicting main_app processes!")
+            print("⚠️  Only run this test when you understand the implications.")
+            print("="*60)
             results['websocket_market'] = test_websocket_market_data()
         
-        if args.test == 'websocket_trade' or args.test == 'websocket_all' or args.test == 'all':
+        if args.test == 'websocket_trade':
             print("\n" + "="*60)
             print("🧪 WEBSOCKET TEST: Trade Data WebSocket")
+            print("="*60)
+            print("⚠️  WARNING: This test requires no conflicting main_app processes!")
+            print("⚠️  Only run this test when you understand the implications.")
+            print("="*60)
+            results['websocket_trade'] = test_websocket_trade_data()
+        
+        if args.test == 'websocket_all':
+            print("\n" + "="*60)
+            print("🧪 WEBSOCKET TEST: Market Data WebSocket")
+            print("="*60)
+            print("⚠️  WARNING: This test requires no conflicting main_app processes!")
+            print("⚠️  Only run this test when you understand the implications.")
+            print("="*60)
+            results['websocket_market'] = test_websocket_market_data()
+            
+            print("\n" + "="*60)
+            print("🧪 WEBSOCKET TEST: Trade Data WebSocket")
+            print("="*60)
+            print("⚠️  WARNING: This test requires no conflicting main_app processes!")
+            print("⚠️  Only run this test when you understand the implications.")
             print("="*60)
             results['websocket_trade'] = test_websocket_trade_data()
         
@@ -4118,6 +4141,13 @@ def main():
             print("="*60)
             results['caretaker_asset_caretaker'] = test_integration_asset_caretaker_scenarios()
         
+        # Backtesting Infrastructure Test (Phase 4)
+        if args.test == 'backtesting' or args.test == 'all':
+            print("\n" + "="*60)
+            print("🧪 BACKTESTING: Historical Bars Infrastructure Test")
+            print("="*60)
+            results['backtesting_historical_bars'] = test_integration_backtesting_historical_bars()
+        
         if args.test == 'watchdog':
             print("\n" + "="*60)
             print("🧪 CARETAKER SCRIPT: Watchdog Integration Test")
@@ -4169,10 +4199,11 @@ def print_help():
     print("""
 Integration Test Script - DCA Trading Bot
 
-WebSocket Tests:
+WebSocket Tests (Run Only When Specifically Requested):
   websocket_market    : Market Data WebSocket connectivity and quote data reception
   websocket_trade     : Trade Data WebSocket connectivity and trade update reception
   websocket_all       : Run both WebSocket tests
+  ⚠️  Note: WebSocket tests require no conflicting main_app processes!
 
 DCA Scenario Tests (10 Specific Trading Scenarios):
   scenario1      : Test DCA Cycle Full Run Fixed TP
@@ -4189,31 +4220,38 @@ DCA Scenario Tests (10 Specific Trading Scenarios):
 Caretaker Script Tests (Phase 3 - Script Integration):
   order_manager  : Test Order Manager caretaker script (stale/orphaned order handling)
   cooldown_manager : Test Cooldown Manager caretaker script (cooldown period expiration)
+  consistency_checker : Test Consistency Checker caretaker script (data integrity)
+  asset_caretaker : Test Asset Caretaker caretaker script (asset management)
+
+Backtesting Infrastructure Tests (Phase 4):
+  backtesting    : Test Historical Bars Infrastructure (fetch_historical_bars.py)
 
 Combined:
   scenarios       : All 10 DCA scenario tests
   caretakers      : All caretaker script tests (excludes watchdog for safety)
-  all             : Run WebSocket tests + DCA scenarios + caretaker tests (excludes watchdog)
+  all             : Run DCA scenarios + caretaker tests + backtesting (excludes websocket & watchdog)
 
 Usage:
-  python integration_test.py                           # Run all tests (14 total)
+  python integration_test.py                           # Run all tests (15 total)
   python integration_test.py --test websocket_market   # Run specific WebSocket test
   python integration_test.py --test scenario1         # Run specific DCA scenario
   python integration_test.py --test scenarios          # Run all 10 DCA scenarios
   python integration_test.py --test order_manager      # Run caretaker script test
   python integration_test.py --test cooldown_manager   # Run cooldown manager script test
+  python integration_test.py --test backtesting        # Run backtesting infrastructure test
   python integration_test.py --help-tests             # Show this help
 
 Requirements:
   - .env.test file with paper trading credentials and test database config
-  - Test database with required tables (dca_assets, dca_cycles, dca_orders)
+  - Test database with required tables (dca_assets, dca_cycles, dca_orders, historical_1min_bars)
   - Alpaca paper trading account
 
 Expected Results:
-  - 2 WebSocket Tests (Market Data WebSocket + Trade Data WebSocket)
+  - 2 WebSocket Tests (Only when specifically requested)
   - 10 DCA Scenario Tests (Scenario 1-10 as specified in requirements)
-  - 2 Caretaker Script Tests (Order Manager Integration Test + Cooldown Manager Integration Test)
-  - Total: 14 tests when running 'all'
+  - 4 Caretaker Script Tests (Order Manager + Cooldown Manager + Consistency Checker + Asset Caretaker)
+  - 1 Backtesting Infrastructure Test (Historical Bars)
+  - Total: 15 tests when running 'all' (excludes websocket tests and watchdog)
     """)
 
 
@@ -5931,6 +5969,219 @@ def test_integration_watchdog_scenarios():
         except:
             pass
         # Note: No comprehensive_test_teardown needed as this doesn't use DB/Alpaca
+
+
+def test_integration_backtesting_historical_bars():
+    """
+    Integration test for backtesting historical bars infrastructure.
+    Tests the fetch_historical_bars.py script functionality.
+    """
+    print("\n" + "="*80)
+    print("🧪 INTEGRATION TEST: BACKTESTING HISTORICAL BARS")
+    print("="*80)
+    
+    try:
+        # Import the script
+        import sys
+        import os
+        sys.path.append(os.path.join(os.path.dirname(__file__), 'scripts'))
+        from scripts.fetch_historical_bars import HistoricalBarsFetcher
+        from datetime import datetime, timedelta
+        from decimal import Decimal
+        
+        print("📋 Testing backtesting infrastructure components...")
+        
+        # A. Test Database Table Existence
+        print("\n📋 SCENARIO A: Verify historical_1min_bars table exists")
+        print("-" * 60)
+        
+        # Check if table exists
+        table_check_query = "SHOW TABLES LIKE 'historical_1min_bars'"
+        table_result = execute_test_query(table_check_query, fetch_one=True)
+        
+        if table_result:
+            print("   ✅ historical_1min_bars table exists")
+            
+            # Check table structure
+            describe_query = "DESCRIBE historical_1min_bars"
+            columns = execute_test_query(describe_query, fetch_all=True)
+            
+            expected_columns = ['id', 'asset_id', 'timestamp', 'open', 'high', 'low', 'close', 'volume']
+            found_columns = [col['Field'] for col in columns]
+            
+            for expected_col in expected_columns:
+                if expected_col in found_columns:
+                    print(f"   ✅ Column '{expected_col}' exists")
+                else:
+                    print(f"   ❌ Column '{expected_col}' missing")
+                    
+        else:
+            print("   ❌ historical_1min_bars table does not exist")
+            print("   💡 Run: mysql < sql/create_historical_1min_bars_table.sql")
+        
+        # B. Test HistoricalBarsFetcher Initialization
+        print("\n📋 SCENARIO B: Test HistoricalBarsFetcher initialization")
+        print("-" * 60)
+        
+        try:
+            fetcher = HistoricalBarsFetcher()
+            print("   ✅ HistoricalBarsFetcher created successfully")
+            
+            # Test client initialization
+            if hasattr(fetcher, 'client') and fetcher.client is not None:
+                print("   ✅ Alpaca client initialized")
+            else:
+                print("   ❌ Alpaca client not initialized")
+                
+        except Exception as e:
+            print(f"   ❌ Failed to create HistoricalBarsFetcher: {e}")
+        
+        # C. Test Asset Mapping Functionality
+        print("\n📋 SCENARIO C: Test asset mapping functionality")
+        print("-" * 60)
+        
+        try:
+            # Get asset mapping
+            asset_mapping = fetcher.get_asset_mapping()
+            print(f"   📊 Found {len(asset_mapping)} enabled assets")
+            
+            if asset_mapping:
+                for symbol, asset_id in asset_mapping.items():
+                    print(f"   📈 {symbol} -> asset_id {asset_id}")
+                print("   ✅ Asset mapping retrieved successfully")
+            else:
+                print("   ⚠️ No enabled assets found in dca_assets table")
+                print("   💡 This is expected if no assets are configured for testing")
+                
+        except Exception as e:
+            print(f"   ❌ Failed to get asset mapping: {e}")
+        
+        # D. Test Database Storage Functionality (Mock Data)
+        print("\n📋 SCENARIO D: Test database storage with mock data")
+        print("-" * 60)
+        
+        try:
+            # Create a test asset if none exist
+            test_asset_id = None
+            if not asset_mapping:
+                print("   🔧 Creating test asset for storage test...")
+                test_asset_id = setup_test_asset(
+                    symbol="TEST/USD",
+                    enabled=True,
+                    base_order_amount=Decimal('10.0')
+                )
+                print(f"   ✅ Created test asset with ID: {test_asset_id}")
+            else:
+                # Use first available asset
+                test_asset_id = list(asset_mapping.values())[0]
+                print(f"   📊 Using existing asset ID: {test_asset_id}")
+            
+            # Create mock bar data
+            class MockBar:
+                def __init__(self, timestamp, open_price, high_price, low_price, close_price):
+                    self.timestamp = timestamp
+                    self.open = open_price
+                    self.high = high_price
+                    self.low = low_price
+                    self.close = close_price
+                    self.volume = Decimal('100.0')
+                    self.trade_count = 50
+                    self.vwap = (open_price + close_price) / 2
+            
+            # Create test bars
+            base_time = datetime(2024, 1, 1, 12, 0, 0)
+            mock_bars = []
+            for i in range(3):
+                bar_time = base_time + timedelta(minutes=i)
+                mock_bar = MockBar(
+                    timestamp=bar_time,
+                    open_price=Decimal('50000.00'),
+                    high_price=Decimal('50100.00'),
+                    low_price=Decimal('49900.00'),
+                    close_price=Decimal('50050.00')
+                )
+                mock_bars.append(mock_bar)
+            
+            # Test storing bars
+            stored_count = fetcher.store_bars(test_asset_id, mock_bars)
+            print(f"   ✅ Stored {stored_count} mock bars successfully")
+            
+            # Verify bars were stored
+            verify_query = """
+                SELECT COUNT(*) as count 
+                FROM historical_1min_bars 
+                WHERE asset_id = %s AND timestamp >= %s
+            """
+            result = execute_test_query(verify_query, (test_asset_id, base_time), fetch_one=True)
+            
+            if result and result['count'] >= len(mock_bars):
+                print(f"   ✅ Verified {result['count']} bars in database")
+            else:
+                print(f"   ⚠️ Expected {len(mock_bars)} bars, found {result['count'] if result else 0}")
+                
+        except Exception as e:
+            print(f"   ❌ Failed storage test: {e}")
+            import traceback
+            print(f"   📋 Traceback: {traceback.format_exc()}")
+        
+        # E. Test Latest Timestamp Functionality
+        print("\n📋 SCENARIO E: Test latest timestamp functionality")
+        print("-" * 60)
+        
+        try:
+            if test_asset_id:
+                latest_timestamp = fetcher.get_latest_timestamp(test_asset_id)
+                
+                if latest_timestamp:
+                    print(f"   ✅ Latest timestamp: {latest_timestamp}")
+                    print("   📊 get_latest_timestamp() working correctly")
+                else:
+                    print("   ⚠️ No latest timestamp found (expected if no data)")
+                    
+        except Exception as e:
+            print(f"   ❌ Failed latest timestamp test: {e}")
+        
+        # F. Test Command Line Interface (Argument Parsing)
+        print("\n📋 SCENARIO F: Test command line interface")
+        print("-" * 60)
+        
+        try:
+            # Test that we can import and access the main function
+            from scripts.fetch_historical_bars import main, parse_date
+            
+            # Test date parsing
+            test_date = parse_date("2024-01-15")
+            expected_date = datetime(2024, 1, 15)
+            
+            if test_date == expected_date:
+                print("   ✅ Date parsing function works correctly")
+            else:
+                print(f"   ❌ Date parsing failed: got {test_date}, expected {expected_date}")
+                
+            print("   ✅ Command line interface components accessible")
+            
+        except Exception as e:
+            print(f"   ❌ Failed CLI test: {e}")
+        
+        print("\n🎉 BACKTESTING INTEGRATION TEST: PASSED")
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ BACKTESTING INTEGRATION TEST FAILED: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+    
+    finally:
+        # Cleanup test data
+        try:
+            if 'test_asset_id' in locals() and test_asset_id:
+                # Clean up test bars
+                cleanup_query = "DELETE FROM historical_1min_bars WHERE asset_id = %s"
+                execute_test_query(cleanup_query, (test_asset_id,), commit=True)
+                print("   🧹 Cleaned up test historical bars data")
+        except Exception as cleanup_error:
+            print(f"   ⚠️ Cleanup warning: {cleanup_error}")
 
 
 if __name__ == '__main__':

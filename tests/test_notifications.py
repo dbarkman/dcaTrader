@@ -193,9 +193,11 @@ class TestEmailAlerts(unittest.TestCase):
         self.assertIn("BASE_ORDER_PLACED", body)
         self.assertIn("order_id: 123", body)
     
+    @patch('utils.notifications._is_test_mode')
     @patch('utils.notifications.send_email_alert')
-    def test_send_system_alert(self, mock_send_email):
+    def test_send_system_alert(self, mock_send_email, mock_is_test_mode):
         """Test system alert formatting."""
+        mock_is_test_mode.return_value = False  # Disable test mode for this test
         mock_send_email.return_value = True
         
         result = send_system_alert(
@@ -218,9 +220,11 @@ class TestEmailAlerts(unittest.TestCase):
         self.assertIn("Application started", body)
         self.assertIn("Stack trace here", body)
     
+    @patch('utils.notifications._is_test_mode')
     @patch('utils.notifications.send_email_alert')
-    def test_critical_system_alert_bypasses_rate_limit(self, mock_send_email):
+    def test_critical_system_alert_bypasses_rate_limit(self, mock_send_email, mock_is_test_mode):
         """Test that critical system alerts bypass rate limiting."""
+        mock_is_test_mode.return_value = False  # Disable test mode for this test
         mock_send_email.return_value = True
         
         send_system_alert(
@@ -261,9 +265,11 @@ class TestEmailAlerts(unittest.TestCase):
         self.assertFalse(result)
     
     @patch('utils.notifications.config')
+    @patch('utils.notifications._is_test_mode')
     @patch('utils.notifications.send_trading_alert')
-    def test_convenience_alert_functions(self, mock_send_trading, mock_config):
+    def test_convenience_alert_functions(self, mock_send_trading, mock_is_test_mode, mock_config):
         """Test convenience alert functions."""
+        mock_is_test_mode.return_value = False  # Disable test mode for this test
         mock_config.trading_alerts_enabled = True
         mock_send_trading.return_value = True
         
@@ -282,9 +288,11 @@ class TestEmailAlerts(unittest.TestCase):
         # Verify calls were made
         self.assertEqual(mock_send_trading.call_count, 3)
     
+    @patch('utils.notifications._is_test_mode')
     @patch('utils.notifications.send_system_alert')
-    def test_convenience_system_alert_functions(self, mock_send_system):
+    def test_convenience_system_alert_functions(self, mock_send_system, mock_is_test_mode):
         """Test convenience system alert functions."""
+        mock_is_test_mode.return_value = False  # Disable test mode for this test
         mock_send_system.return_value = True
         
         # Test system error alert

@@ -48,6 +48,79 @@ The core strategy involves placing an initial base order for a configured crypto
   * WebSocket processes handle real-time event listening and reactive order placement/DB updates.  
   * Caretaker cron scripts handle periodic checks, data synchronization, and system stability tasks.
 
+## **4.5. Backtesting Infrastructure**
+
+### **4.5.1. Overview**
+
+The backtesting system allows testing DCA strategies against historical market data to evaluate performance before risking real capital. The infrastructure consists of:
+
+* **Historical Data Storage:** 1-minute OHLCV bars stored in the `historical_1min_bars` table
+* **Data Fetching:** Automated scripts to populate and maintain historical data from Alpaca
+* **Strategy Testing:** (Future) Backtesting engine to simulate DCA strategy execution
+
+### **4.5.2. Historical Data Table**
+
+**Table: historical_1min_bars** (Stores 1-minute historical bars for backtesting)
+```sql
+CREATE TABLE historical_1min_bars (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    asset_id INT NOT NULL,
+    timestamp DATETIME NOT NULL,
+    open DECIMAL(20, 10) NOT NULL,
+    high DECIMAL(20, 10) NOT NULL,
+    low DECIMAL(20, 10) NOT NULL,
+    close DECIMAL(20, 10) NOT NULL,
+    volume DECIMAL(30, 15) NOT NULL DEFAULT 0,
+    trade_count DECIMAL(20, 10) DEFAULT NULL,
+    vwap DECIMAL(20, 10) DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    
+    UNIQUE KEY unique_asset_timestamp (asset_id, timestamp),
+    INDEX idx_timestamp (timestamp),
+    INDEX idx_asset_id (asset_id),
+    INDEX idx_asset_timestamp_range (asset_id, timestamp),
+    
+    FOREIGN KEY (asset_id) REFERENCES dca_assets(id) ON DELETE CASCADE
+) COMMENT = 'Historical 1-minute OHLCV bars for cryptocurrency backtesting';
+```
+
+### **4.5.3. Historical Data Management**
+
+**Create the historical data table:**
+```bash
+python scripts/create_historical_bars_table.py
+```
+
+**Fetch historical data:**
+```bash
+# Bulk fetch for specific symbols and date range
+python scripts/fetch_historical_bars.py --symbols "BTC/USD,ETH/USD" --start-date "2024-01-01" --end-date "2024-01-31" --mode bulk
+
+# Incremental update for all configured assets
+python scripts/fetch_historical_bars.py --all-configured --mode incremental
+
+# Fetch recent data for one symbol
+python scripts/fetch_historical_bars.py --symbols "BTC/USD" --start-date "2024-12-01" --mode bulk
+```
+
+**Features:**
+* **Bulk Mode:** Initial population of large historical datasets
+* **Incremental Mode:** Ongoing updates to keep data current
+* **API Rate Limiting:** Respects Alpaca API limits with automatic delays
+* **Pagination Handling:** Efficiently processes large datasets across multiple API pages
+* **Upsert Logic:** Prevents duplicate data while allowing updates
+* **Robust Error Handling:** Continues processing other symbols if one fails
+
+### **4.5.4. Data Schema Details**
+
+The historical bars table captures all available properties from the Alpaca API:
+* **OHLC Prices:** Open, High, Low, Close with high precision (DECIMAL 20,10)
+* **Volume Data:** Trading volume with extended precision (DECIMAL 30,15)
+* **Additional Metrics:** Trade count and VWAP when available
+* **Indexing:** Optimized for time-range queries common in backtesting
+* **Foreign Key:** Links to asset configuration in `dca_assets` table
+
 ## **5\. Setup Process**
 
 ### **5.1. Prerequisites**

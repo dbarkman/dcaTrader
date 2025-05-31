@@ -35,6 +35,32 @@ config = get_config()
 logger = logging.getLogger(__name__)
 
 
+def _is_test_mode() -> bool:
+    """
+    Check if we're running in test mode.
+    
+    Returns True if:
+    - Using test database (dcaTraderBot-test)
+    - DCA_CONFIG_PATH points to .env.test
+    - Any other test indicators
+    """
+    # Check if using test database
+    if hasattr(config, 'db_name') and config.db_name and 'test' in config.db_name.lower():
+        return True
+    
+    # Check if using .env.test config file
+    config_path = os.getenv('DCA_CONFIG_PATH', '')
+    if '.env.test' in config_path:
+        return True
+    
+    # Check for other test indicators
+    testing_mode = os.getenv('TESTING_MODE', '').lower() in ['true', '1', 'yes']
+    if testing_mode:
+        return True
+    
+    return False
+
+
 class NotificationError(Exception):
     """Raised when notification sending fails."""
     pass
@@ -185,10 +211,16 @@ def send_trading_alert(
     Returns:
         True if alert was sent successfully, False otherwise
     """
+    # Check if we're in test mode - skip email notifications during tests
+    if _is_test_mode():
+        logger.debug(f"Test mode detected, skipping email {event_type} alert for {asset_symbol}")
+        return True  # Return success to avoid breaking tests
+    
     # Check if trading alerts are enabled
     if not config.trading_alerts_enabled:
         logger.debug(f"Trading alerts disabled, skipping {event_type} alert for {asset_symbol}")
         return True  # Return True to indicate "success" (alert was intentionally skipped)
+    
     # Create formatted subject and body
     subject = f"{event_type} - {asset_symbol}"
     
@@ -235,6 +267,11 @@ def send_system_alert(
     Returns:
         True if alert was sent successfully, False otherwise
     """
+    # Check if we're in test mode - skip email notifications during tests
+    if _is_test_mode():
+        logger.debug(f"Test mode detected, skipping email system alert for {component}: {message}")
+        return True  # Return success to avoid breaking tests
+    
     subject = f"System Alert - {component}"
     
     body_lines = [
@@ -350,6 +387,11 @@ If you received this email, your email configuration is working correctly.
 # Convenience functions for common alert types
 def alert_order_placed(asset_symbol: str, order_type: str, order_id: str, quantity: float, price: float) -> bool:
     """Send alert for order placement."""
+    # Check if we're in test mode - skip email notifications during tests
+    if _is_test_mode():
+        logger.debug(f"Test mode detected, skipping email order placed alert for {asset_symbol}")
+        return True  # Return success to avoid breaking tests
+    
     if not config.trading_alerts_enabled:
         logger.debug(f"Trading alerts disabled, skipping order placed alert for {asset_symbol}")
         return True
@@ -368,6 +410,11 @@ def alert_order_placed(asset_symbol: str, order_type: str, order_id: str, quanti
 
 def alert_order_filled(asset_symbol: str, order_type: str, order_id: str, fill_price: float, quantity: float) -> bool:
     """Send alert for order fill."""
+    # Check if we're in test mode - skip email notifications during tests
+    if _is_test_mode():
+        logger.debug(f"Test mode detected, skipping email order filled alert for {asset_symbol}")
+        return True  # Return success to avoid breaking tests
+    
     if not config.trading_alerts_enabled:
         logger.debug(f"Trading alerts disabled, skipping order filled alert for {asset_symbol}")
         return True
