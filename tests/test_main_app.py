@@ -94,9 +94,14 @@ def test_validate_environment_missing_key():
     'DB_PASSWORD': 'test_pass',
     'DB_NAME': 'test_db'
 })
-@patch('main_app.check_and_place_base_order')
-async def test_on_crypto_quote_handler(mock_check_base_order, caplog):
+@patch('main_app.get_asset_config')
+@patch('main_app.get_latest_cycle') 
+async def test_on_crypto_quote_handler(mock_get_cycle, mock_get_asset, caplog):
     """Test cryptocurrency quote handler with mock quote data."""
+    # Mock asset config and cycle to return None (unconfigured asset)
+    mock_get_asset.return_value = None
+    mock_get_cycle.return_value = None
+    
     # Create a mock quote object
     mock_quote = MagicMock()
     mock_quote.symbol = 'BTC/USD'
@@ -119,8 +124,8 @@ async def test_on_crypto_quote_handler(mock_check_base_order, caplog):
     assert 'Bid: $50000.5 @ 1.5' in log_message
     assert 'Ask: $50001.0 @ 2.0' in log_message
     
-    # Verify that base order check was called
-    mock_check_base_order.assert_called_once_with(mock_quote)
+    # Verify that asset config was checked
+    mock_get_asset.assert_called_once_with('BTC/USD')
 
 
 @pytest.mark.unit

@@ -15,40 +15,59 @@ import signal
 import logging
 import os
 import sys
-from typing import Optional
-from decimal import Decimal
-from datetime import datetime, timedelta, timezone
+import threading
 import decimal
+from datetime import datetime, timezone
+from decimal import Decimal
+import mysql.connector
 from pathlib import Path
+from typing import Optional
 
 # Add src directory to path for imports
 sys.path.insert(0, os.path.dirname(__file__))
 
+from config import get_config
+from utils.alpaca_client_rest import *
+from utils.formatting import format_price, format_quantity
+from models.asset_config import get_asset_config, update_asset_config
+from models.cycle_data import get_latest_cycle, update_cycle, create_cycle
+from utils.db_utils import execute_query
+from utils.logging_config import get_asset_logger
+from utils.notifications import (
+    send_system_alert, 
+    alert_order_placed, 
+    alert_order_filled, 
+    alert_cycle_completed,
+    alert_critical_error
+)
+from utils.discord_notifications import (
+    discord_order_placed,
+    discord_order_filled,
+    discord_cycle_completed,
+    discord_system_error
+)
+
+# Import Alpaca streaming and trading clients
 from alpaca.data.live import CryptoDataStream
 from alpaca.trading.stream import TradingStream
 from alpaca.trading.client import TradingClient
 from alpaca.common.exceptions import APIError
-import mysql.connector
 
-# Import our configuration and logging
-from config import get_config
-from utils.logging_config import setup_main_app_logging, get_asset_logger, log_asset_lifecycle_event
-from utils.notifications import alert_order_placed, alert_order_filled, alert_system_error, alert_critical_error
-from utils.discord_notifications import (
-    discord_order_placed, discord_order_filled, discord_cycle_completed, 
-    discord_system_error, discord_system_alert
+# Import new strategy logic and data structures
+from strategy_logic import (
+    decide_base_order_action,
+    decide_safety_order_action, 
+    decide_take_profit_action
 )
-
-# Import our database models and utilities
-from utils.db_utils import get_db_connection, execute_query
-from models.asset_config import get_asset_config, update_asset_config, get_all_enabled_assets
-from models.cycle_data import get_latest_cycle, update_cycle, create_cycle
-from utils.alpaca_client_rest import get_trading_client, place_limit_buy_order, get_positions, place_market_sell_order
-from utils.formatting import format_price, format_quantity, format_percentage
+from models.backtest_structs import (
+    MarketTickInput, StrategyAction, OrderSide, OrderType
+)
 
 # Initialize configuration and logging
 config = get_config()
-setup_main_app_logging(enable_asset_tracking=True)
+recent_orders = {}  # Global dictionary to track recent orders and prevent duplicates
+
+# Setup logging
 logger = logging.getLogger(__name__)
 
 # Global flag for graceful shutdown
@@ -56,9 +75,6 @@ shutdown_requested = False
 # Global stream references for shutdown
 crypto_stream_ref = None
 trading_stream_ref = None
-
-# Global tracking for recent orders to prevent duplicates
-recent_orders = {}  # symbol -> {'order_id': str, 'timestamp': datetime}
 
 # PID file configuration
 PID_FILE_PATH = Path(__file__).parent.parent / 'main_app.pid'
@@ -113,713 +129,334 @@ async def on_crypto_quote(quote):
     """
     Handler for cryptocurrency quote updates.
     
-    Phase 4: Monitor prices and place base orders when conditions are met.
-    Phase 5: Monitor prices and place safety orders when conditions are met.
-    Phase 6: Monitor prices and place take-profit orders when conditions are met.
+    Refactored to use pure strategy logic that returns intents,
+    then execute those intents using Alpaca client and database utilities.
     
     Args:
         quote: Quote object from Alpaca containing bid/ask data
     """
     logger.debug(f"Quote: {quote.symbol} - Bid: ${quote.bid_price} @ {quote.bid_size}, Ask: ${quote.ask_price} @ {quote.ask_size}")
     
-    # Phase 4: Check if we should place a base order for this asset
-    try:
-        await asyncio.to_thread(check_and_place_base_order, quote)
-    except Exception as e:
-        logger.error(f"Error in base order check for {quote.symbol}: {e}")
-    
-    # Phase 5: Check if we should place a safety order for this asset
-    try:
-        await asyncio.to_thread(check_and_place_safety_order, quote)
-    except Exception as e:
-        logger.error(f"Error in safety order check for {quote.symbol}: {e}")
-    
-    # Phase 6: Check if we should place a take-profit order for this asset
-    try:
-        await asyncio.to_thread(check_and_place_take_profit_order, quote)
-    except Exception as e:
-        logger.error(f"Error in take-profit check for {quote.symbol}: {e}")
-
-
-def check_and_place_base_order(quote):
-    """
-    Check if conditions are met to place a base order and place it if so.
-    
-    This function runs in a separate thread to avoid blocking the WebSocket.
-    
-    Args:
-        quote: Quote object from Alpaca containing bid/ask data
-    """
+    # Check for recent orders to prevent duplicates
     global recent_orders
     symbol = quote.symbol
-    ask_price = quote.ask_price
-    bid_price = quote.bid_price
+    now = datetime.now()
+    recent_order_cooldown = config.order_cooldown_seconds
+    
+    if symbol in recent_orders:
+        time_since_order = now - recent_orders[symbol]['timestamp']
+        if time_since_order.total_seconds() < recent_order_cooldown:
+            return
     
     try:
-        # Get asset-specific logger for lifecycle tracking
-        asset_logger = get_asset_logger(symbol)
+        # Step 1: Convert quote to MarketTickInput for strategy functions
+        market_input = MarketTickInput(
+            timestamp=now,
+            current_ask_price=Decimal(str(quote.ask_price)),
+            current_bid_price=Decimal(str(quote.bid_price)),
+            symbol=symbol
+        )
         
-        # Step 1: Check for recent orders to prevent duplicates
-        now = datetime.now()
-        recent_order_cooldown = config.order_cooldown_seconds
-        
-        if symbol in recent_orders:
-            time_since_order = now - recent_orders[symbol]['timestamp']
-            if time_since_order.total_seconds() < recent_order_cooldown:
-                return
-        
-        # Step 2: Get asset configuration
+        # Step 2: Get asset configuration and current cycle
         asset_config = get_asset_config(symbol)
         if not asset_config:
             # Asset not configured - skip silently
             return
         
         if not asset_config.is_enabled:
-            logger.debug(f"Asset {symbol} is disabled, skipping base order check")
+            logger.debug(f"Asset {symbol} is disabled, skipping")
             return
         
-        # Step 3: Get latest cycle for this asset
         latest_cycle = get_latest_cycle(asset_config.id)
         if not latest_cycle:
             return
         
-        # Step 4: Check if cycle is in 'watching' status with zero quantity
-        if latest_cycle.status != 'watching':
-            return
-        
-        if latest_cycle.quantity != Decimal('0'):
-            return
-        
-        logger.info(f"Base order conditions met for {symbol} - checking Alpaca positions...")
-        
-        # Step 5: Initialize Alpaca client and check for existing positions
+        # Step 3: Initialize Alpaca client and get current position
         client = get_trading_client()
         if not client:
             logger.error(f"Could not initialize Alpaca client for {symbol}")
             return
         
-        # Step 6: Check for existing positions (ignore tiny positions below minimum order size)
+        # Get current Alpaca position for base order conflict check and sell quantity accuracy
+        current_alpaca_position = None
         try:
             positions = get_positions(client)
-        except APIError as e:
-            logger.error(f"Alpaca API error fetching positions for {symbol}: {e}")
-            return
+            alpaca_symbol = symbol.replace('/', '')  # Convert UNI/USD -> UNIUSD
+            
+            for position in positions:
+                if position.symbol == alpaca_symbol and float(position.qty) != 0:
+                    current_alpaca_position = position
+                    break
         except Exception as e:
-            logger.error(f"Unexpected error fetching positions for {symbol}: {e}")
-            return
-            
-        existing_position = None
-        min_order_qty = 0.000000002  # Alpaca's minimum order quantity for crypto
+            logger.error(f"Error fetching Alpaca positions for {symbol}: {e}")
+            # Continue without position data - some strategy functions will handle this gracefully
         
-        # Convert symbol format for Alpaca comparison (UNI/USD -> UNIUSD)
-        alpaca_symbol = symbol.replace('/', '')
+        # Step 4: Call strategy functions to get action intents
+        actions_to_execute = []
         
-        for position in positions:
-            if position.symbol == alpaca_symbol and float(position.qty) != 0:
-                position_qty = float(position.qty)
-                
-                # Ignore tiny positions that are below minimum order size
-                if position_qty < min_order_qty:
-                    logger.debug(f"Ignoring tiny position for {symbol}: {position_qty} < {min_order_qty}")
-                    continue
-                    
-                existing_position = position
-                break
-        
-        if existing_position:
-            logger.warning(f"Base order for {symbol} skipped, existing position found on Alpaca. "
-                          f"Position: {existing_position.qty} @ ${existing_position.avg_entry_price}")
-            # TODO: Send notification in future phases
-            return
-        
-        # Step 7: No existing position - we can place a base order
-        logger.info(f"No existing position for {symbol} - proceeding with base order placement")
-        
-        # Step 8: Calculate order size (convert USD to crypto quantity)
-        if not ask_price or ask_price <= 0:
-            logger.error(f"Invalid ask price for {symbol}: {ask_price}")
-            return
-        
-        if not bid_price or bid_price <= 0:
-            logger.error(f"Invalid bid price for {symbol}: {bid_price}")
-            return
-        
-        base_order_usd = float(asset_config.base_order_amount)
-        if not base_order_usd or base_order_usd <= 0:
-            logger.error(f"Invalid base order amount for {symbol}: {base_order_usd}")
-            return
-            
-        order_quantity = base_order_usd / ask_price
-        
-        # Validate calculated values before placing order
-        if not order_quantity or order_quantity <= 0:
-            logger.error(f"Invalid calculated order quantity for {symbol}: {order_quantity}")
-            return
-        
-        # Enhanced price logging
-        spread = ask_price - bid_price
-        spread_pct = (spread / bid_price) * 100 if bid_price > 0 else 0
-        
-        logger.info(f"📊 Market Data for {symbol}:")
-        logger.info(f"   Bid: {format_price(bid_price)} | Ask: {format_price(ask_price)} | Spread: {format_price(spread)} ({spread_pct:.3f}%)")
-        logger.info(f"   Order Amount: ${base_order_usd} ÷ {format_price(ask_price)} = {format_quantity(order_quantity)} {symbol.split('/')[0]}")
-        
-        # Step 9: Place the base limit buy order with detailed logging
-        
-        # For integration testing, use aggressive pricing to ensure fast fills
-        testing_mode = os.getenv('TESTING_MODE', 'false').lower() == 'true'
-        if testing_mode:
-            # Use 5% above ask for aggressive fills during testing
-            aggressive_price = ask_price * 1.05
-            logger.info(f"🚀 TESTING MODE: Using aggressive pricing (5% above ask)")
-            logger.info(f"   Ask Price: {format_price(ask_price)}")
-            logger.info(f"   Aggressive Price: {format_price(aggressive_price)} (+5%)")
-            limit_price = aggressive_price
-        else:
-            # Normal production mode: use ask price
-            limit_price = ask_price
-        
-        logger.info(f"🔄 Placing LIMIT BUY order for {symbol}:")
-        logger.info(f"   Type: LIMIT | Side: BUY")
-        logger.info(f"   Limit Price: {format_price(limit_price)} {'(AGGRESSIVE +5%)' if testing_mode else '(current ask)'}")
-        logger.info(f"   Quantity: {format_quantity(order_quantity)}")
-        logger.info(f"   Total Value: ${base_order_usd}")
-        
-        order = place_limit_buy_order(
-            client=client,
-            symbol=symbol,
-            qty=order_quantity,
-            limit_price=limit_price,
-            time_in_force='gtc'  # Use 'gtc' orders for crypto (day is not valid for crypto)
-        )
-        
-        if order:
-            # Track this order to prevent duplicates
-            recent_orders[symbol] = {
-                'order_id': order.id,
-                'timestamp': now
-            }
-            
-            # Update cycle to 'buying' status with order details
-            try:
-                updates = {
-                    'status': 'buying',
-                    'latest_order_id': str(order.id),  # Convert UUID to string
-                    'latest_order_created_at': now
-                }
-                update_success = update_cycle(latest_cycle.id, updates)
-                if update_success:
-                    logger.info(f"🔄 Updated cycle {latest_cycle.id} to 'buying' status with order {order.id}")
-                else:
-                    logger.warning(f"⚠️ Failed to update cycle {latest_cycle.id} with order {order.id}")
-            except Exception as e:
-                logger.error(f"Error updating cycle for {symbol}: {e}")
-            
-            logger.info(f"✅ LIMIT BUY order PLACED for {symbol}:")
-            logger.info(f"   Order ID: {order.id}")
-            logger.info(f"   Quantity: {format_quantity(order_quantity)}")
-            logger.info(f"   Limit Price: {format_price(limit_price)}")
-            logger.info(f"   Time in Force: GTC")
-            
-            # Send Discord notification for order placement
-            discord_order_placed(
-                asset_symbol=symbol,
-                order_type="Base Order",
-                order_id=str(order.id),
-                quantity=float(order_quantity),
-                price=float(limit_price)
+        # Check base order action
+        try:
+            base_action = decide_base_order_action(
+                market_input, asset_config, latest_cycle, current_alpaca_position
             )
-        else:
-            logger.error(f"❌ Failed to place base order for {symbol}")
-            
-            # Track failed order attempts to prevent immediate retries
-            recent_orders[symbol] = {
-                'order_id': 'FAILED',
-                'timestamp': now
-            }
-            
+            if base_action and base_action.has_action():
+                actions_to_execute.append(('base_order', base_action))
+        except Exception as e:
+            logger.error(f"Error in decide_base_order_action for {symbol}: {e}")
+        
+        # Check safety order action
+        try:
+            safety_action = decide_safety_order_action(
+                market_input, asset_config, latest_cycle
+            )
+            if safety_action and safety_action.has_action():
+                actions_to_execute.append(('safety_order', safety_action))
+        except Exception as e:
+            logger.error(f"Error in decide_safety_order_action for {symbol}: {e}")
+        
+        # Check take-profit action
+        try:
+            tp_action = decide_take_profit_action(
+                market_input, asset_config, latest_cycle, current_alpaca_position
+            )
+            if tp_action and tp_action.has_action():
+                actions_to_execute.append(('take_profit', tp_action))
+        except Exception as e:
+            logger.error(f"Error in decide_take_profit_action for {symbol}: {e}")
+        
+        # Step 5: Execute the action intents
+        for action_type, action in actions_to_execute:
+            try:
+                await execute_strategy_action(action, action_type, latest_cycle, client, symbol, now)
+            except Exception as e:
+                logger.error(f"Error executing {action_type} action for {symbol}: {e}")
+                
     except Exception as e:
-        logger.error(f"Error in check_and_place_base_order for {symbol}: {e}")
+        logger.error(f"Error in on_crypto_quote for {symbol}: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
 
 
-def check_and_place_safety_order(quote):
+async def execute_strategy_action(
+    action: StrategyAction, 
+    action_type: str, 
+    cycle: 'DcaCycle', 
+    client: 'TradingClient', 
+    symbol: str, 
+    timestamp: datetime
+) -> None:
     """
-    Check if conditions are met to place a safety order and place it if so.
-    
-    This function runs in a separate thread to avoid blocking the WebSocket.
-    Safety orders are placed when:
-    - Cycle status is 'watching' AND quantity > 0 (position exists)
-    - Safety orders count < max_safety_orders
-    - Current ask price <= trigger price (last_order_fill_price * (1 - safety_order_deviation/100))
+    Execute a strategy action by placing orders and updating cycle state.
     
     Args:
-        quote: Quote object from Alpaca containing bid/ask data
+        action: The StrategyAction to execute
+        action_type: Type of action for logging ('base_order', 'safety_order', 'take_profit')
+        cycle: The DCA cycle to update
+        client: Alpaca trading client
+        symbol: Trading symbol
+        timestamp: Current timestamp
     """
     global recent_orders
-    symbol = quote.symbol
-    ask_price = quote.ask_price
-    bid_price = quote.bid_price
     
     try:
-        # Step 1: Check for recent orders to prevent duplicates
-        now = datetime.now()
-        recent_order_cooldown = int(os.getenv('ORDER_COOLDOWN_SECONDS', '5'))  # Default 5 seconds
+        order_id = None
         
-        if symbol in recent_orders:
-            time_since_order = now - recent_orders[symbol]['timestamp']
-            if time_since_order.total_seconds() < recent_order_cooldown:
-                return
-        
-        # Step 2: Get asset configuration
-        asset_config = get_asset_config(symbol)
-        if not asset_config:
-            # Asset not configured - skip silently
-            return
-        
-        if not asset_config.is_enabled:
-            logger.debug(f"Asset {symbol} is disabled, skipping safety order check")
-            return
-        
-        # Step 3: Get latest cycle for this asset
-        latest_cycle = get_latest_cycle(asset_config.id)
-        if not latest_cycle:
-            return
-        
-        # Step 4: Check if cycle is in 'watching' status with quantity > 0 (existing position)
-        if latest_cycle.status != 'watching':
-            return
-        
-        if latest_cycle.quantity <= Decimal('0'):
-            return
-        
-        # Step 5: Check if we can place more safety orders
-        if latest_cycle.safety_orders >= asset_config.max_safety_orders:
-            logger.debug(f"Asset {symbol} already at max safety orders ({latest_cycle.safety_orders}/{asset_config.max_safety_orders}) - skipping")
-            return
-        
-        # Step 6: Check if we have a last_order_fill_price to calculate trigger from
-        if latest_cycle.last_order_fill_price is None:
-            return
-        
-        # Step 7: Calculate trigger price for safety order
-        safety_deviation_decimal = asset_config.safety_order_deviation / Decimal('100')  # Convert % to decimal
-        trigger_price = latest_cycle.last_order_fill_price * (Decimal('1') - safety_deviation_decimal)
-        
-        # Convert ask_price to Decimal for consistent calculations
-        ask_price_decimal = Decimal(str(ask_price))
-        
-        # Step 8: Check if current ask price has dropped enough to trigger safety order
-        if ask_price_decimal > trigger_price:
-            return
-        
-        logger.info(f"🛡️ Safety order conditions met for {symbol}!")
-        
-        # Step 9: Validate market data
-        if not ask_price or ask_price <= 0:
-            logger.error(f"Invalid ask price for safety order {symbol}: {ask_price}")
-            return
-        
-        if not bid_price or bid_price <= 0:
-            logger.error(f"Invalid bid price for safety order {symbol}: {bid_price}")
-            return
-        
-        # Step 10: Initialize Alpaca client 
-        client = get_trading_client()
-        if not client:
-            logger.error(f"Could not initialize Alpaca client for safety order {symbol}")
-            return
-        
-        # Step 11: Calculate safety order size (convert USD to crypto quantity)
-        safety_order_usd = float(asset_config.safety_order_amount)
-        if not safety_order_usd or safety_order_usd <= 0:
-            logger.error(f"Invalid safety order amount for {symbol}: {safety_order_usd}")
-            return
-            
-        order_quantity = safety_order_usd / ask_price
-        
-        # Validate calculated values before placing order
-        if not order_quantity or order_quantity <= 0:
-            logger.error(f"Invalid calculated safety order quantity for {symbol}: {order_quantity}")
-            return
-        
-        # Enhanced logging for safety order
-        price_drop = latest_cycle.last_order_fill_price - ask_price_decimal
-        price_drop_pct = (price_drop / latest_cycle.last_order_fill_price) * Decimal('100')
-        
-        logger.info(f"📊 Safety Order Analysis for {symbol}:")
-        logger.info(f"   Last Fill: {format_price(latest_cycle.last_order_fill_price)} | Current Ask: {format_price(ask_price)}")
-        logger.info(f"   Price Drop: {format_price(price_drop)} ({price_drop_pct:.2f}%)")
-        logger.info(f"   Trigger at: {format_price(trigger_price)} ({asset_config.safety_order_deviation}% drop)")
-        logger.info(f"   Safety Orders: {latest_cycle.safety_orders + 1}/{asset_config.max_safety_orders}")
-        logger.info(f"   Order Amount: ${safety_order_usd} ÷ {format_price(ask_price)} = {format_quantity(order_quantity)} {symbol.split('/')[0]}")
-        
-        # Step 12: Place the safety limit buy order with detailed logging
-        
-        # For integration testing, use aggressive pricing to ensure fast fills
-        testing_mode = os.getenv('TESTING_MODE', 'false').lower() == 'true'
-        if testing_mode:
-            # Use 5% above ask for aggressive fills during testing
-            aggressive_price = ask_price * 1.05
-            logger.info(f"🚀 TESTING MODE: Using aggressive pricing (5% above ask)")
-            logger.info(f"   Ask Price: {format_price(ask_price)}")
-            logger.info(f"   Aggressive Price: {format_price(aggressive_price)} (+5%)")
-            limit_price = aggressive_price
-        else:
-            # Normal production mode: use ask price
-            limit_price = ask_price
-        
-        logger.info(f"🔄 Placing SAFETY LIMIT BUY order for {symbol}:")
-        logger.info(f"   Type: LIMIT | Side: BUY | Order Type: SAFETY #{latest_cycle.safety_orders + 1}")
-        logger.info(f"   Limit Price: {format_price(limit_price)} {'(AGGRESSIVE +5%)' if testing_mode else '(current ask)'}")
-        logger.info(f"   Quantity: {format_quantity(order_quantity)}")
-        logger.info(f"   Total Value: ${safety_order_usd}")
-        
-        order = place_limit_buy_order(
-            client=client,
-            symbol=symbol,
-            qty=order_quantity,
-            limit_price=limit_price,
-            time_in_force='gtc'  # Use 'gtc' orders for crypto (day is not valid for crypto)
-        )
-        
-        if order:
-            # Track this order to prevent duplicates
-            recent_orders[symbol] = {
-                'order_id': order.id,
-                'timestamp': now
-            }
-            
-            # Update cycle to 'buying' status with order details
-            try:
-                updates = {
-                    'status': 'buying',
-                    'latest_order_id': str(order.id),  # Convert UUID to string
-                    'latest_order_created_at': now
-                }
-                update_success = update_cycle(latest_cycle.id, updates)
-                if update_success:
-                    logger.info(f"🔄 Updated cycle {latest_cycle.id} to 'buying' status with safety order {order.id}")
-                else:
-                    logger.warning(f"⚠️ Failed to update cycle {latest_cycle.id} with safety order {order.id}")
-            except mysql.connector.Error as db_err:
-                logger.error(f"Database error updating cycle for safety order {symbol}: {db_err}")
-            except Exception as e:
-                logger.error(f"Unexpected error updating cycle for safety order {symbol}: {e}")
-            
-            logger.info(f"✅ SAFETY LIMIT BUY order PLACED for {symbol}:")
-            logger.info(f"   Order ID: {order.id}")
-            logger.info(f"   Safety Order #: {latest_cycle.safety_orders + 1}")
-            logger.info(f"   Quantity: {format_quantity(order_quantity)}")
-            logger.info(f"   Limit Price: {format_price(limit_price)}")
-            logger.info(f"   Time in Force: GTC")
-            
-            # Send Discord notification for safety order placement
-            discord_order_placed(
-                asset_symbol=symbol,
-                order_type=f"Safety Order #{latest_cycle.safety_orders + 1}",
-                order_id=str(order.id),
-                quantity=float(order_quantity),
-                price=float(limit_price)
-            )
-        else:
-            logger.error(f"❌ Failed to place safety order for {symbol}")
-            
-            # Track failed order attempts to prevent immediate retries
-            recent_orders[symbol] = {
-                'order_id': 'FAILED',
-                'timestamp': now
-            }
-            
-    except APIError as e:
-        logger.error(f"Alpaca API error in safety order check for {symbol}: {e}")
-    except mysql.connector.Error as db_err:
-        logger.error(f"Database error in safety order check for {symbol}: {db_err}")
-    except Exception as e:
-        logger.error(f"Unexpected error in check_and_place_safety_order for {symbol}: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-
-
-def check_and_place_take_profit_order(quote):
-    """
-    Check if conditions are met to place a take-profit order and place it if so.
-    
-    This function runs in a separate thread to avoid blocking the WebSocket.
-    Take-profit orders are placed when:
-    - Cycle status is 'watching' AND quantity > 0 (position exists)
-    - Safety order conditions are NOT met (price hasn't dropped enough)
-    - Current bid price >= take-profit trigger price (average_purchase_price * (1 + take_profit_percent/100))
-    
-    Args:
-        quote: Quote object from Alpaca containing bid/ask data
-    """
-    from decimal import Decimal
-    global recent_orders
-    symbol = quote.symbol
-    ask_price = quote.ask_price
-    bid_price = quote.bid_price
-    
-    try:
-        # Step 1: Check for recent orders to prevent duplicates
-        now = datetime.now()
-        recent_order_cooldown = int(os.getenv('ORDER_COOLDOWN_SECONDS', '5'))  # Default 5 seconds
-        
-        if symbol in recent_orders:
-            time_since_order = now - recent_orders[symbol]['timestamp']
-            if time_since_order.total_seconds() < recent_order_cooldown:
-                return
-        
-        # Step 2: Get asset configuration
-        asset_config = get_asset_config(symbol)
-        if not asset_config:
-            # Asset not configured - skip silently
-            return
-
-        if not asset_config.is_enabled:
-            logger.debug(f"Asset {symbol} is disabled, skipping take-profit check")
-            return
-
-        # Step 3: Get latest cycle for this asset
-        latest_cycle = get_latest_cycle(asset_config.id)
-        if not latest_cycle:
-            return
-
-        # Step 4: Check if cycle is in valid status for take-profit/TTP processing
-        # Valid statuses: 'watching' (standard TP or TTP activation) or 'trailing' (TTP active)
-        if latest_cycle.status not in ['watching', 'trailing']:
-            return
-
-        if latest_cycle.quantity <= Decimal('0'):
-            return
-        
-        # Step 5: Check if we have valid average_purchase_price for take-profit calculation
-        if latest_cycle.average_purchase_price is None or latest_cycle.average_purchase_price <= Decimal('0'):
-            logger.debug(f"Asset {symbol} has invalid average_purchase_price {latest_cycle.average_purchase_price} - cannot calculate take-profit")
-            return
-        
-        # Step 6: Check safety order conditions are NOT met (we don't want to sell if we should be buying more)
-        # Only check if we have last_order_fill_price and haven't reached max safety orders
-        safety_order_would_trigger = False
-        
-        if (latest_cycle.last_order_fill_price is not None and 
-            latest_cycle.safety_orders < asset_config.max_safety_orders):
-            
-            safety_deviation_decimal = asset_config.safety_order_deviation / Decimal('100')
-            safety_trigger_price = latest_cycle.last_order_fill_price * (Decimal('1') - safety_deviation_decimal)
-            
-            # Safely convert ask_price to Decimal
-            try:
-                ask_price_decimal = Decimal(str(ask_price))
-            except (ValueError, TypeError, decimal.InvalidOperation) as e:
-                logger.debug(f"Invalid ask_price for {symbol}: {ask_price} (type: {type(ask_price)}) - skipping")
-                return
-            
-            if ask_price_decimal <= safety_trigger_price:
-                safety_order_would_trigger = True
-                logger.debug(f"Safety order would trigger for {symbol} (ask ${ask_price} <= trigger {format_price(safety_trigger_price)}) - skipping take-profit")
-                return
-        
-        # Step 7: TTP-aware take-profit logic
-        take_profit_percent_decimal = asset_config.take_profit_percent / Decimal('100')  # Convert % to decimal
-        take_profit_trigger_price = latest_cycle.average_purchase_price * (Decimal('1') + take_profit_percent_decimal)
-        
-        # Convert bid_price to Decimal for consistent calculations
-        bid_price_decimal = Decimal(str(bid_price))
-        
-        # Step 8: TTP Logic Implementation
-        if not asset_config.ttp_enabled:
-            # Standard take-profit logic (TTP disabled)
-            if bid_price_decimal < take_profit_trigger_price:
-                return
-            
-            logger.info(f"💰 Standard take-profit conditions met for {symbol}!")
-            
-        else:
-            # TTP logic (TTP enabled)
-            if latest_cycle.status == 'watching':
-                # TTP not yet activated - check if we should activate it
-                if bid_price_decimal >= take_profit_trigger_price:
-                    # Activate TTP - update cycle to 'trailing' status and set initial peak
-                    logger.info(f"🎯 TTP activated for {symbol}, cycle {latest_cycle.id}. Initial peak: ${bid_price}")
-                    
-                    updates = {
-                        'status': 'trailing',
-                        'highest_trailing_price': bid_price_decimal
-                    }
-                    
-                    update_success = update_cycle(latest_cycle.id, updates)
-                    if update_success:
-                        logger.info(f"✅ Cycle {latest_cycle.id} updated to 'trailing' status with peak ${bid_price}")
-                    else:
-                        logger.error(f"❌ Failed to activate TTP for cycle {latest_cycle.id}")
-                    
-                    return  # Don't place sell order yet, just activated TTP
-                else:
-                    return
-                    
-            elif latest_cycle.status == 'trailing':
-                # TTP is active - check for new peak or sell trigger
-                current_peak = latest_cycle.highest_trailing_price or Decimal('0')
+        # Step 1: Execute order intent if present
+        if action.order_intent:
+            order = await execute_order_intent(action.order_intent, client, action_type, symbol)
+            if order:
+                order_id = str(order.id)
                 
-                if bid_price_decimal > current_peak:
-                    # New peak reached - update highest_trailing_price
-                    logger.info(f"🎯 TTP new peak for {symbol}, cycle {latest_cycle.id}: ${bid_price}")
-                    
-                    updates = {
-                        'highest_trailing_price': bid_price_decimal
-                    }
-                    
-                    update_success = update_cycle(latest_cycle.id, updates)
-                    if update_success:
-                        logger.debug(f"Updated highest_trailing_price to ${bid_price} for cycle {latest_cycle.id}")
-                    else:
-                        logger.error(f"❌ Failed to update TTP peak for cycle {latest_cycle.id}")
-                    
-                    return  # Don't sell yet, just updated peak
-                    
-                else:
-                    # Check if price has dropped enough to trigger TTP sell
-                    if asset_config.ttp_deviation_percent is None:
-                        logger.error(f"TTP enabled for {symbol} but ttp_deviation_percent is None - cannot calculate sell trigger")
-                        return
-                    
-                    ttp_deviation_decimal = asset_config.ttp_deviation_percent / Decimal('100')
-                    ttp_sell_trigger_price = current_peak * (Decimal('1') - ttp_deviation_decimal)
-                    
-                    if bid_price_decimal < ttp_sell_trigger_price:
-                        # TTP sell triggered!
-                        logger.info(f"🎯 TTP sell triggered for {symbol}, cycle {latest_cycle.id}. Peak: ${current_peak}, Deviation: {asset_config.ttp_deviation_percent}%, Current Price: ${bid_price}")
-                        logger.info(f"💰 TTP conditions met for {symbol}!")
-                    else:
-                        return
-        
-        # Step 9: Validate market data
-        if not bid_price or bid_price <= 0:
-            logger.error(f"Invalid bid price for take-profit {symbol}: {bid_price}")
-            return
-        
-        # Step 10: Initialize Alpaca client 
-        client = get_trading_client()
-        if not client:
-            logger.error(f"Could not initialize Alpaca client for take-profit {symbol}")
-            return
-        
-        # Step 11: Get actual Alpaca position quantity for accurate sell order
-        alpaca_position = get_alpaca_position_by_symbol(client, symbol)
-        if not alpaca_position:
-            logger.error(f"No Alpaca position found for take-profit {symbol} - cannot place sell order")
-            return
-        
-        # Use actual Alpaca position quantity to avoid quantity mismatches
-        # Handle precision issues by using the exact string value from Alpaca
-        alpaca_qty_str = str(alpaca_position.qty)
-        
-        # For all assets, use normal float conversion
-        sell_quantity = float(alpaca_qty_str)
-        
-        # Validate calculated values before placing order
-        if not sell_quantity or sell_quantity <= 0:
-            logger.error(f"Invalid sell quantity for take-profit {symbol}: {sell_quantity}")
-            return
-        
-        # Check if quantity meets Alpaca's minimum order requirements
-        min_order_qty = 0.000000002  # Alpaca's minimum order quantity for crypto
-        if sell_quantity < min_order_qty:
-            logger.warning(f"⚠️ Take-profit skipped for {symbol}: quantity {sell_quantity} < minimum {min_order_qty}")
-            
-            # Auto-reset tiny positions to unblock the cycle
-            handle_tiny_position(latest_cycle, alpaca_position, symbol, bid_price_decimal)
-            return
-        
-        # Log quantity comparison for debugging
-        db_quantity = float(latest_cycle.quantity)
-        if abs(sell_quantity - db_quantity) > 0.000001:  # Allow for small floating point differences
-            logger.warning(f"Quantity mismatch for {symbol}: DB={format_quantity(db_quantity)}, Alpaca={format_quantity(sell_quantity)}")
-            logger.info(f"Using Alpaca position quantity for accuracy: {format_quantity(sell_quantity)}")
-        
-        # Enhanced logging for take-profit order
-        price_gain = bid_price_decimal - latest_cycle.average_purchase_price
-        price_gain_pct = (price_gain / latest_cycle.average_purchase_price) * Decimal('100')
-        estimated_proceeds = bid_price_decimal * latest_cycle.quantity
-        estimated_cost = latest_cycle.average_purchase_price * latest_cycle.quantity
-        estimated_profit = estimated_proceeds - estimated_cost
-        
-        # Determine order type for logging
-        order_type_desc = "TTP" if asset_config.ttp_enabled else "TAKE-PROFIT"
-        
-        logger.info(f"📊 {order_type_desc} Analysis for {symbol}:")
-        logger.info(f"   Avg Purchase: {format_price(latest_cycle.average_purchase_price)} | Current Bid: {format_price(bid_price)}")
-        logger.info(f"   Price Gain: {format_price(price_gain)} ({price_gain_pct:.2f}%)")
-        logger.info(f"   Take-Profit Trigger: {format_price(take_profit_trigger_price)} ({asset_config.take_profit_percent}% gain)")
-        
-        if asset_config.ttp_enabled and latest_cycle.status == 'trailing':
-            current_peak = latest_cycle.highest_trailing_price or Decimal('0')
-            ttp_deviation_decimal = asset_config.ttp_deviation_percent / Decimal('100')
-            ttp_sell_trigger_price = current_peak * (Decimal('1') - ttp_deviation_decimal)
-            logger.info(f"   TTP Peak: {format_price(current_peak)} | TTP Deviation: {asset_config.ttp_deviation_percent}%")
-            logger.info(f"   TTP Sell Trigger: {format_price(ttp_sell_trigger_price)}")
-        
-        logger.info(f"   Position: {latest_cycle.quantity} {symbol.split('/')[0]}")
-        logger.info(f"   Est. Proceeds: ${estimated_proceeds:.2f} | Est. Cost: ${estimated_cost:.2f}")
-        logger.info(f"   Est. Profit: ${estimated_profit:.2f}")
-        
-        # Step 12: Place the market sell order
-        logger.info(f"🔄 Placing MARKET SELL order for {symbol}:")
-        logger.info(f"   Type: MARKET | Side: SELL | Order Type: {order_type_desc}")
-        logger.info(f"   Quantity: {format_quantity(sell_quantity)}")
-        logger.info(f"   Current Bid: {format_price(bid_price)}")
-        logger.info(f"   💰 Selling entire position at market price")
-        
-        order = place_market_sell_order(
-            client=client,
-            symbol=symbol,
-            qty=sell_quantity,
-            time_in_force='gtc'  # Crypto market orders require 'gtc'
-        )
-        
-        if order:
-            # Track this order to prevent duplicates
-            recent_orders[symbol] = {
-                'order_id': order.id,
-                'timestamp': now
-            }
-            
-            logger.info(f"✅ MARKET SELL order PLACED for {symbol}:")
-            logger.info(f"   Order ID: {order.id}")
-            logger.info(f"   Quantity: {format_quantity(sell_quantity)}")
-            logger.info(f"   Order Type: MARKET")
-            logger.info(f"   💰 {order_type_desc} triggered by {price_gain_pct:.2f}% gain")
-            
-            # NEW: Immediately update the cycle to reflect that we're actively trying to sell
-            from datetime import timezone
-            updates = {
-                'status': 'selling',
-                'latest_order_id': str(order.id),  # Convert UUID to string
-                'latest_order_created_at': datetime.now(timezone.utc)
-            }
-            
-            update_success = update_cycle(latest_cycle.id, updates)
-            if update_success:
-                logger.info(f"✅ Cycle {latest_cycle.id} status updated to 'selling', latest_order_id set for SELL order {order.id}")
+                # Track this order to prevent duplicates
+                recent_orders[symbol] = {
+                    'order_id': order_id,
+                    'timestamp': timestamp
+                }
+                
+                # Send Discord notification for order placement
+                order_type_name = {
+                    'base_order': 'Base Order',
+                    'safety_order': f'Safety Order #{cycle.safety_orders + 1}',
+                    'take_profit': 'Take Profit'
+                }.get(action_type, action_type.title())
+                
+                discord_order_placed(
+                    asset_symbol=symbol,
+                    order_type=order_type_name,
+                    order_id=order_id,
+                    quantity=float(action.order_intent.quantity),
+                    price=float(action.order_intent.limit_price or action.order_intent.quantity)
+                )
             else:
-                logger.error(f"❌ Failed to update cycle {latest_cycle.id} after placing SELL order {order.id}")
+                logger.error(f"❌ Failed to place {action_type} order for {symbol}")
                 
-            # TradingStream will complete the cycle update when the order fills
-        else:
-            logger.error(f"❌ Failed to place take-profit order for {symbol}")
-            
-            # Track failed order attempts to prevent immediate retries
-            recent_orders[symbol] = {
-                'order_id': 'FAILED',
-                'timestamp': now
-            }
+                # Track failed order attempts to prevent immediate retries
+                recent_orders[symbol] = {
+                    'order_id': 'FAILED',
+                    'timestamp': timestamp
+                }
+                return
+        
+        # Step 2: Execute cycle state update intent if present
+        if action.cycle_update_intent:
+            await execute_cycle_update_intent(action.cycle_update_intent, cycle, order_id)
+        
+        # Step 3: Execute TTP state update intent if present
+        if action.ttp_update_intent:
+            await execute_ttp_update_intent(action.ttp_update_intent, cycle)
             
     except Exception as e:
-        logger.error(f"Error in check_and_place_take_profit_order for {symbol}: {e}")
+        logger.error(f"Error executing strategy action for {symbol}: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
+
+
+async def execute_order_intent(
+    order_intent: 'OrderIntent', 
+    client: 'TradingClient', 
+    action_type: str, 
+    symbol: str
+) -> Optional[object]:
+    """
+    Execute an order intent by placing the actual order with Alpaca.
+    
+    Args:
+        order_intent: The order intent to execute
+        client: Alpaca trading client
+        action_type: Type of action for logging
+        symbol: Trading symbol
+        
+    Returns:
+        Alpaca order object if successful, None otherwise
+    """
+    try:
+        if order_intent.side == OrderSide.BUY and order_intent.order_type == OrderType.LIMIT:
+            logger.info(f"🔄 Placing LIMIT BUY order for {symbol} ({action_type}):")
+            logger.info(f"   Quantity: {format_quantity(order_intent.quantity)}")
+            logger.info(f"   Limit Price: {format_price(order_intent.limit_price)}")
+            
+            order = place_limit_buy_order(
+                client=client,
+                symbol=symbol,
+                qty=float(order_intent.quantity),
+                limit_price=float(order_intent.limit_price),
+                time_in_force='gtc'
+            )
+            
+            if order:
+                logger.info(f"✅ LIMIT BUY order PLACED for {symbol}:")
+                logger.info(f"   Order ID: {order.id}")
+                logger.info(f"   Quantity: {format_quantity(order_intent.quantity)}")
+                logger.info(f"   Limit Price: {format_price(order_intent.limit_price)}")
+                
+            return order
+            
+        elif order_intent.side == OrderSide.SELL and order_intent.order_type == OrderType.MARKET:
+            logger.info(f"🔄 Placing MARKET SELL order for {symbol} ({action_type}):")
+            logger.info(f"   Quantity: {format_quantity(order_intent.quantity)}")
+            
+            order = place_market_sell_order(
+                client=client,
+                symbol=symbol,
+                qty=float(order_intent.quantity),
+                time_in_force='gtc'
+            )
+            
+            if order:
+                logger.info(f"✅ MARKET SELL order PLACED for {symbol}:")
+                logger.info(f"   Order ID: {order.id}")
+                logger.info(f"   Quantity: {format_quantity(order_intent.quantity)}")
+                
+            return order
+            
+        else:
+            logger.error(f"Unsupported order intent: {order_intent.side.value} {order_intent.order_type.value}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"Error executing order intent for {symbol}: {e}")
+        return None
+
+
+async def execute_cycle_update_intent(
+    update_intent: 'CycleStateUpdateIntent', 
+    cycle: 'DcaCycle', 
+    order_id: Optional[str]
+) -> None:
+    """
+    Execute a cycle state update intent.
+    
+    Args:
+        update_intent: The cycle update intent to execute
+        cycle: The DCA cycle to update
+        order_id: Order ID from placed order (if any)
+    """
+    try:
+        updates = {}
+        
+        if update_intent.new_status:
+            updates['status'] = update_intent.new_status
+        
+        if order_id:
+            updates['latest_order_id'] = order_id
+        elif update_intent.new_latest_order_id:
+            updates['latest_order_id'] = update_intent.new_latest_order_id
+            
+        if update_intent.new_latest_order_created_at:
+            updates['latest_order_created_at'] = update_intent.new_latest_order_created_at
+        
+        if update_intent.new_quantity is not None:
+            updates['quantity'] = update_intent.new_quantity
+            
+        if update_intent.new_average_purchase_price is not None:
+            updates['average_purchase_price'] = update_intent.new_average_purchase_price
+            
+        if update_intent.new_safety_orders is not None:
+            updates['safety_orders'] = update_intent.new_safety_orders
+            
+        if update_intent.new_last_order_fill_price is not None:
+            updates['last_order_fill_price'] = update_intent.new_last_order_fill_price
+        
+        if updates:
+            update_success = update_cycle(cycle.id, updates)
+            if update_success:
+                logger.info(f"🔄 Updated cycle {cycle.id} with {updates}")
+            else:
+                logger.warning(f"⚠️ Failed to update cycle {cycle.id} with {updates}")
+                
+    except Exception as e:
+        logger.error(f"Error executing cycle update intent: {e}")
+
+
+async def execute_ttp_update_intent(
+    ttp_intent: 'TTPStateUpdateIntent', 
+    cycle: 'DcaCycle'
+) -> None:
+    """
+    Execute a TTP state update intent.
+    
+    Args:
+        ttp_intent: The TTP update intent to execute
+        cycle: The DCA cycle to update
+    """
+    try:
+        updates = {}
+        
+        if ttp_intent.new_status:
+            updates['status'] = ttp_intent.new_status
+            
+        if ttp_intent.new_highest_trailing_price is not None:
+            updates['highest_trailing_price'] = ttp_intent.new_highest_trailing_price
+        
+        if updates:
+            update_success = update_cycle(cycle.id, updates)
+            if update_success:
+                logger.info(f"🎯 Updated TTP state for cycle {cycle.id} with {updates}")
+            else:
+                logger.warning(f"⚠️ Failed to update TTP state for cycle {cycle.id} with {updates}")
+                
+    except Exception as e:
+        logger.error(f"Error executing TTP update intent: {e}")
 
 
 async def on_crypto_trade(trade):

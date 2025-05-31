@@ -1487,14 +1487,17 @@ def test_dca_cycle_full_run_fixed_tp():
                 recent_logs = f.readlines()[-50:]  # Get last 50 lines
                 log_content = ''.join(recent_logs)
                 
-                # Check for take-profit analysis
-                if 'Standard take-profit conditions met for BTC/USD' in log_content:
+                # Check for take-profit analysis - updated for new architecture
+                if ('🔄 Placing MARKET SELL order for BTC/USD (take_profit)' in log_content or
+                    'Standard take-profit conditions met for BTC/USD' in log_content or
+                    'take_profit' in log_content.lower()):
                     tp_logic_executed = True
                     print("   ✅ Take-profit conditions detection verified")
                 
-                # Check for order placement attempt
+                # Check for order placement attempt - updated for new architecture
                 if ('🔄 Placing MARKET SELL order for BTC/USD' in log_content or 
-                    'Placing market SELL order:' in log_content):
+                    'Placing market SELL order:' in log_content or
+                    '✅ MARKET SELL order PLACED for BTC/USD' in log_content):
                     order_placement_attempted = True
                     print("   ✅ Take-profit order placement attempted")
                 

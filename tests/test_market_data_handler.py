@@ -10,11 +10,13 @@ from decimal import Decimal
 from unittest.mock import Mock, patch, MagicMock
 import sys
 import os
+from datetime import datetime, timezone
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from main_app import check_and_place_base_order, check_and_place_safety_order
+from strategy_logic import decide_base_order_action, decide_safety_order_action
+from models.backtest_structs import MarketTickInput, OrderSide, OrderType
 
 
 class TestBaseOrderLogic:
@@ -22,10 +24,12 @@ class TestBaseOrderLogic:
     
     def setup_method(self):
         """Set up test fixtures"""
-        self.mock_quote = Mock()
-        self.mock_quote.symbol = 'BTC/USD'
-        self.mock_quote.ask_price = 50000.0
-        self.mock_quote.bid_price = 49950.0
+        self.market_input = MarketTickInput(
+            timestamp=datetime.now(timezone.utc),
+            symbol='BTC/USD',
+            current_ask_price=Decimal('50000.0'),
+            current_bid_price=Decimal('49950.0')
+        )
         
         self.mock_asset = Mock()
         self.mock_asset.id = 1
@@ -40,134 +44,76 @@ class TestBaseOrderLogic:
         self.mock_cycle.quantity = Decimal('0')
     
     @pytest.mark.unit
-    @patch('main_app.recent_orders', {})
-    @patch('main_app.get_asset_config')
-    def test_base_order_skipped_if_asset_not_configured(self, mock_get_asset):
-        """Test that base order is skipped if asset is not configured"""
-        mock_get_asset.return_value = None
-        
-        # Should return early without error
-        check_and_place_base_order(self.mock_quote)
-        
-        mock_get_asset.assert_called_once_with('BTC/USD')
-    
-    @pytest.mark.unit
-    @patch('main_app.get_latest_cycle')
-    @patch('main_app.get_asset_config')
-    def test_base_order_skipped_if_asset_disabled(self, mock_get_asset, mock_get_cycle):
+    def test_base_order_skipped_if_asset_disabled(self):
         """Test that base order is skipped if asset is disabled"""
         disabled_asset = Mock()
         disabled_asset.is_enabled = False
-        mock_get_asset.return_value = disabled_asset
         
-        check_and_place_base_order(self.mock_quote)
+        result = decide_base_order_action(
+            self.market_input, disabled_asset, self.mock_cycle
+        )
         
-        # Should not call get_latest_cycle
-        mock_get_cycle.assert_not_called()
+        assert result is None
     
     @pytest.mark.unit
-    @patch('main_app.recent_orders', {})
-    @patch('main_app.get_latest_cycle')
-    @patch('main_app.get_asset_config')
-    def test_base_order_skipped_if_no_cycle(self, mock_get_asset, mock_get_cycle):
-        """Test that base order is skipped if no cycle exists"""
-        mock_get_asset.return_value = self.mock_asset
-        mock_get_cycle.return_value = None
-        
-        check_and_place_base_order(self.mock_quote)
-        
-        mock_get_cycle.assert_called_once_with(1)
-    
-    @pytest.mark.unit
-    @patch('main_app.get_latest_cycle')
-    @patch('main_app.get_asset_config')
-    def test_base_order_skipped_if_cycle_not_watching(self, mock_get_asset, mock_get_cycle):
+    def test_base_order_skipped_if_cycle_not_watching(self):
         """Test that base order is skipped if cycle status is not 'watching'"""
-        mock_get_asset.return_value = self.mock_asset
-        
         buying_cycle = Mock()
         buying_cycle.status = 'buying'
         buying_cycle.quantity = Decimal('0')
-        mock_get_cycle.return_value = buying_cycle
         
-        check_and_place_base_order(self.mock_quote)
+        result = decide_base_order_action(
+            self.market_input, self.mock_asset, buying_cycle
+        )
         
-        # Should return without calling Alpaca
+        assert result is None
     
     @pytest.mark.unit
-    @patch('main_app.get_latest_cycle')
-    @patch('main_app.get_asset_config')
-    def test_base_order_skipped_if_cycle_has_quantity(self, mock_get_asset, mock_get_cycle):
+    def test_base_order_skipped_if_cycle_has_quantity(self):
         """Test that base order is skipped if cycle already has quantity"""
-        mock_get_asset.return_value = self.mock_asset
-        
         active_cycle = Mock()
         active_cycle.status = 'watching'
         active_cycle.quantity = Decimal('0.1')  # Already has quantity
-        mock_get_cycle.return_value = active_cycle
         
-        check_and_place_base_order(self.mock_quote)
+        result = decide_base_order_action(
+            self.market_input, self.mock_asset, active_cycle
+        )
+        
+        assert result is None
     
     @pytest.mark.unit
-    @patch('main_app.place_limit_buy_order')
-    @patch('main_app.get_positions')
-    @patch('main_app.get_trading_client')
-    @patch('main_app.get_latest_cycle')
-    @patch('main_app.get_asset_config')
-    def test_base_order_skipped_if_position_exists(self, mock_get_asset, mock_get_cycle, 
-                                                   mock_get_client, mock_get_positions, 
-                                                   mock_place_order):
+    def test_base_order_skipped_if_position_exists(self):
         """Test that base order is skipped if Alpaca position already exists"""
-        mock_get_asset.return_value = self.mock_asset
-        mock_get_cycle.return_value = self.mock_cycle
-        mock_client = Mock()
-        mock_get_client.return_value = mock_client
-        
-        # Mock existing position (Alpaca format without slash)
+        # Mock existing position
         existing_position = Mock()
-        existing_position.symbol = 'BTCUSD'
         existing_position.qty = '0.1'
         existing_position.avg_entry_price = '48000.0'
-        mock_get_positions.return_value = [existing_position]
         
-        check_and_place_base_order(self.mock_quote)
+        result = decide_base_order_action(
+            self.market_input, self.mock_asset, self.mock_cycle, existing_position
+        )
         
-        # Should not place order
-        mock_place_order.assert_not_called()
+        assert result is None
     
     @pytest.mark.unit
-    @patch('main_app.place_limit_buy_order')
-    @patch('main_app.get_positions')
-    @patch('main_app.get_trading_client')
-    @patch('main_app.get_latest_cycle')
-    @patch('main_app.get_asset_config')
-    @patch('main_app.recent_orders', {})  # Clear the global recent_orders dict
-    def test_base_order_conditions_met(self, mock_get_asset, mock_get_cycle, 
-                                       mock_get_client, mock_get_positions, 
-                                       mock_place_order):
-        """Test that base order is placed when all conditions are met"""
-        mock_get_asset.return_value = self.mock_asset
-        mock_get_cycle.return_value = self.mock_cycle
-        mock_client = Mock()
-        mock_get_client.return_value = mock_client
-        mock_get_positions.return_value = []  # No existing positions
-        
-        # Mock successful order placement
-        mock_order = Mock()
-        mock_order.id = 'test_order_123'
-        mock_place_order.return_value = mock_order
-        
-        check_and_place_base_order(self.mock_quote)
-        
-        # Verify order was placed with correct parameters
-        expected_quantity = 100.0 / 50000.0  # $100 / $50,000 = 0.002 BTC
-        mock_place_order.assert_called_once_with(
-            client=mock_client,
-            symbol='BTC/USD',
-            qty=expected_quantity,
-            limit_price=50000.0,
-            time_in_force='gtc'
+    def test_base_order_conditions_met(self):
+        """Test that base order action is returned when all conditions are met"""
+        result = decide_base_order_action(
+            self.market_input, self.mock_asset, self.mock_cycle
         )
+        
+        assert result is not None
+        assert result.order_intent is not None
+        
+        order_intent = result.order_intent
+        assert order_intent.symbol == 'BTC/USD'
+        assert order_intent.side == OrderSide.BUY
+        assert order_intent.order_type == OrderType.LIMIT
+        
+        # Verify quantity calculation: $100 / $50,000 = 0.002 BTC
+        expected_quantity = Decimal('100.0') / Decimal('50000.0')
+        assert order_intent.quantity == expected_quantity
+        assert order_intent.limit_price == Decimal('50000.0')
     
     @pytest.mark.unit
     def test_base_order_usd_to_qty_conversion(self):
@@ -184,108 +130,204 @@ class TestBaseOrderLogic:
         assert expected_quantity_2 == 0.004
     
     @pytest.mark.unit
-    @patch('main_app.get_latest_cycle')
-    @patch('main_app.get_asset_config')
-    def test_base_order_invalid_ask_price(self, mock_get_asset, mock_get_cycle):
+    def test_base_order_invalid_ask_price(self):
         """Test that base order is skipped with invalid ask price"""
-        mock_get_asset.return_value = self.mock_asset
-        mock_get_cycle.return_value = self.mock_cycle
-        
         # Test with zero ask price
-        invalid_quote = Mock()
-        invalid_quote.symbol = 'BTC/USD'
-        invalid_quote.ask_price = 0.0
+        invalid_market_input = MarketTickInput(
+            timestamp=datetime.now(timezone.utc),
+            symbol='BTC/USD',
+            current_ask_price=Decimal('0.0'),
+            current_bid_price=Decimal('49950.0')
+        )
         
-        # Should return without error
-        check_and_place_base_order(invalid_quote)
+        result = decide_base_order_action(
+            invalid_market_input, self.mock_asset, self.mock_cycle
+        )
         
-        # Test with None ask price
-        invalid_quote.ask_price = None
-        check_and_place_base_order(invalid_quote)
+        assert result is None
     
     @pytest.mark.unit
-    @patch('main_app.place_limit_buy_order')
-    @patch('main_app.get_positions')
-    @patch('main_app.get_trading_client')
-    @patch('main_app.get_latest_cycle')
-    @patch('main_app.get_asset_config')
-    @patch('main_app.recent_orders', {})  # Clear the global recent_orders dict
-    def test_base_order_placement_fails_gracefully(self, mock_get_asset, mock_get_cycle, 
-                                                    mock_get_client, mock_get_positions, 
-                                                    mock_place_order):
-        """Test that failed order placement is handled gracefully"""
-        mock_get_asset.return_value = self.mock_asset
-        mock_get_cycle.return_value = self.mock_cycle
-        mock_client = Mock()
-        mock_get_client.return_value = mock_client
-        mock_get_positions.return_value = []
+    @patch.dict(os.environ, {'TESTING_MODE': 'true'})
+    def test_base_order_testing_mode_pricing(self):
+        """Test that testing mode uses aggressive pricing (5% above ask)"""
+        result = decide_base_order_action(
+            self.market_input, self.mock_asset, self.mock_cycle
+        )
         
-        # Create a properly mocked quote with both ask_price and bid_price
-        test_quote = Mock()
-        test_quote.symbol = 'BTC/USD'
-        test_quote.ask_price = 50000.0
-        test_quote.bid_price = 49999.0  # Required by our enhanced validation
+        assert result is not None
+        order_intent = result.order_intent
         
-        # Mock failed order placement
-        mock_place_order.return_value = None
+        # In testing mode, limit price should be 5% above ask
+        expected_limit_price = Decimal('50000.0') * Decimal('1.05')
+        assert order_intent.limit_price == expected_limit_price
+
+
+class TestSafetyOrderLogic:
+    """Test safety order placement logic"""
+    
+    def setup_method(self):
+        """Set up test fixtures"""
+        self.market_input = MarketTickInput(
+            timestamp=datetime.now(timezone.utc),
+            symbol='BTC/USD',
+            current_ask_price=Decimal('45000.0'),  # Lower price for safety order trigger
+            current_bid_price=Decimal('44950.0')
+        )
         
-        # Should not raise exception
-        check_and_place_base_order(test_quote)
+        self.mock_asset = Mock()
+        self.mock_asset.id = 1
+        self.mock_asset.asset_symbol = 'BTC/USD'
+        self.mock_asset.is_enabled = True
+        self.mock_asset.safety_order_amount = Decimal('200.00')
+        self.mock_asset.safety_order_deviation = Decimal('5.0')  # 5%
+        self.mock_asset.max_safety_orders = 3
         
-        mock_place_order.assert_called_once()
+        self.mock_cycle = Mock()
+        self.mock_cycle.id = 1
+        self.mock_cycle.asset_id = 1
+        self.mock_cycle.status = 'watching'
+        self.mock_cycle.quantity = Decimal('0.002')  # Has existing position
+        self.mock_cycle.safety_orders = 0
+        self.mock_cycle.last_order_fill_price = Decimal('50000.0')  # Last fill at $50k
+    
+    @pytest.mark.unit
+    def test_safety_order_skipped_if_asset_disabled(self):
+        """Test that safety order is skipped if asset is disabled"""
+        disabled_asset = Mock()
+        disabled_asset.is_enabled = False
+        
+        result = decide_safety_order_action(
+            self.market_input, disabled_asset, self.mock_cycle
+        )
+        
+        assert result is None
+    
+    @pytest.mark.unit
+    def test_safety_order_skipped_if_cycle_not_watching(self):
+        """Test that safety order is skipped if cycle status is not 'watching'"""
+        buying_cycle = Mock()
+        buying_cycle.status = 'buying'
+        buying_cycle.quantity = Decimal('0.002')
+        
+        result = decide_safety_order_action(
+            self.market_input, self.mock_asset, buying_cycle
+        )
+        
+        assert result is None
+    
+    @pytest.mark.unit
+    def test_safety_order_skipped_if_no_quantity(self):
+        """Test that safety order is skipped if cycle has no quantity"""
+        empty_cycle = Mock()
+        empty_cycle.status = 'watching'
+        empty_cycle.quantity = Decimal('0')
+        
+        result = decide_safety_order_action(
+            self.market_input, self.mock_asset, empty_cycle
+        )
+        
+        assert result is None
+    
+    @pytest.mark.unit
+    def test_safety_order_skipped_if_max_reached(self):
+        """Test that safety order is skipped if max safety orders reached"""
+        max_cycle = Mock()
+        max_cycle.status = 'watching'
+        max_cycle.quantity = Decimal('0.002')
+        max_cycle.safety_orders = 3  # At max
+        max_cycle.last_order_fill_price = Decimal('50000.0')
+        
+        result = decide_safety_order_action(
+            self.market_input, self.mock_asset, max_cycle
+        )
+        
+        assert result is None
+    
+    @pytest.mark.unit
+    def test_safety_order_skipped_if_price_not_dropped_enough(self):
+        """Test that safety order is skipped if price hasn't dropped enough"""
+        # Current ask is $48k, last fill was $50k = 4% drop
+        # But safety order deviation is 5%, so shouldn't trigger
+        higher_price_input = MarketTickInput(
+            timestamp=datetime.now(timezone.utc),
+            symbol='BTC/USD',
+            current_ask_price=Decimal('48000.0'),  # Only 4% drop
+            current_bid_price=Decimal('47950.0')
+        )
+        
+        result = decide_safety_order_action(
+            higher_price_input, self.mock_asset, self.mock_cycle
+        )
+        
+        assert result is None
+    
+    @pytest.mark.unit
+    def test_safety_order_conditions_met(self):
+        """Test that safety order action is returned when all conditions are met"""
+        # Current ask is $45k, last fill was $50k = 10% drop
+        # Safety order deviation is 5%, so should trigger
+        result = decide_safety_order_action(
+            self.market_input, self.mock_asset, self.mock_cycle
+        )
+        
+        assert result is not None
+        assert result.order_intent is not None
+        
+        order_intent = result.order_intent
+        assert order_intent.symbol == 'BTC/USD'
+        assert order_intent.side == OrderSide.BUY
+        assert order_intent.order_type == OrderType.LIMIT
+        
+        # Verify quantity calculation: $200 / $45,000 ≈ 0.00444 BTC
+        expected_quantity = Decimal('200.0') / Decimal('45000.0')
+        assert order_intent.quantity == expected_quantity
+        assert order_intent.limit_price == Decimal('45000.0')
 
 
 class TestMarketDataIntegration:
-    """Integration tests for market data handler"""
+    """Test market data integration scenarios"""
     
     @pytest.mark.unit
-    def test_quote_object_structure(self):
-        """Test that we handle quote object structure correctly"""
-        # Mock quote object as it would come from Alpaca
-        mock_quote = Mock()
-        mock_quote.symbol = 'ETH/USD'
-        mock_quote.ask_price = 3000.0
-        mock_quote.bid_price = 2999.0
-        mock_quote.ask_size = 100.0
-        mock_quote.bid_size = 150.0
+    def test_market_tick_input_structure(self):
+        """Test MarketTickInput object structure"""
+        market_input = MarketTickInput(
+            timestamp=datetime.now(timezone.utc),
+            symbol='BTC/USD',
+            current_ask_price=Decimal('50000.0'),
+            current_bid_price=Decimal('49950.0')
+        )
         
-        # Should be able to extract required fields
-        assert mock_quote.symbol == 'ETH/USD'
-        assert mock_quote.ask_price == 3000.0
+        assert market_input.symbol == 'BTC/USD'
+        assert market_input.current_ask_price == Decimal('50000.0')
+        assert market_input.current_bid_price == Decimal('49950.0')
+        assert isinstance(market_input.timestamp, datetime)
     
     @pytest.mark.unit
-    @patch('main_app.get_positions')
-    def test_position_filtering_logic(self, mock_get_positions):
-        """Test that we correctly identify existing positions"""
-        # Mock multiple positions
-        btc_position = Mock()
-        btc_position.symbol = 'BTC/USD'
-        btc_position.qty = '0.1'
+    def test_position_filtering_logic(self):
+        """Test position filtering logic for tiny positions"""
+        # Test that tiny positions below minimum order size are ignored
+        tiny_position = Mock()
+        tiny_position.qty = '0.000000001'  # Below minimum
+        tiny_position.avg_entry_price = '50000.0'
         
-        eth_position = Mock()
-        eth_position.symbol = 'ETH/USD'
-        eth_position.qty = '2.5'
+        market_input = MarketTickInput(
+            timestamp=datetime.now(timezone.utc),
+            symbol='BTC/USD',
+            current_ask_price=Decimal('50000.0'),
+            current_bid_price=Decimal('49950.0')
+        )
         
-        zero_position = Mock()
-        zero_position.symbol = 'DOGE/USD'
-        zero_position.qty = '0'  # Zero quantity position should be ignored
+        mock_asset = Mock()
+        mock_asset.is_enabled = True
+        mock_asset.base_order_amount = Decimal('100.00')
         
-        mock_get_positions.return_value = [btc_position, eth_position, zero_position]
+        mock_cycle = Mock()
+        mock_cycle.status = 'watching'
+        mock_cycle.quantity = Decimal('0')
         
-        positions = mock_get_positions()
+        # Should not be blocked by tiny position
+        result = decide_base_order_action(
+            market_input, mock_asset, mock_cycle, tiny_position
+        )
         
-        # Should find BTC position
-        btc_found = None
-        for pos in positions:
-            if pos.symbol == 'BTC/USD' and float(pos.qty) != 0:
-                btc_found = pos
-                break
-        assert btc_found is not None
-        
-        # Should not find DOGE position (zero quantity)
-        doge_found = None
-        for pos in positions:
-            if pos.symbol == 'DOGE/USD' and float(pos.qty) != 0:
-                doge_found = pos
-                break
-        assert doge_found is None 
+        assert result is not None  # Order should be allowed despite tiny position 
