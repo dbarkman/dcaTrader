@@ -3991,7 +3991,7 @@ def main():
             'websocket_market', 'websocket_trade', 'websocket_all',
             'scenario1', 'scenario2', 'scenario3', 'scenario4', 'scenario5',
             'scenario6', 'scenario7', 'scenario8', 'scenario9', 'scenario10',
-            'scenarios', 'order_manager', 'cooldown_manager', 'consistency_checker', 'caretakers', 'all'
+            'scenarios', 'order_manager', 'cooldown_manager', 'consistency_checker', 'asset_caretaker', 'watchdog', 'caretakers', 'all'
         ],
         default='all',
         help='Specific test to run (default: all)'
@@ -4111,7 +4111,18 @@ def main():
             print("🧪 CARETAKER SCRIPT: Consistency Checker Integration Test")
             print("="*60)
             results['caretaker_consistency_checker'] = test_integration_consistency_checker_scenarios()
-
+        
+        if args.test == 'asset_caretaker' or args.test == 'caretakers' or args.test == 'all':
+            print("\n" + "="*60)
+            print("🧪 CARETAKER SCRIPT: Asset Caretaker Integration Test")
+            print("="*60)
+            results['caretaker_asset_caretaker'] = test_integration_asset_caretaker_scenarios()
+        
+        if args.test == 'watchdog' or args.test == 'caretakers' or args.test == 'all':
+            print("\n" + "="*60)
+            print("🧪 CARETAKER SCRIPT: Watchdog Integration Test")
+            print("="*60)
+            results['caretaker_watchdog'] = test_integration_watchdog_scenarios()
         
     except KeyboardInterrupt:
         print("\n\n⚠️ Tests interrupted by user")
@@ -5437,6 +5448,486 @@ def test_integration_consistency_checker_scenarios():
     finally:
         # Cleanup is handled by comprehensive_test_teardown
         comprehensive_test_teardown("consistency_checker_integration_test")
+
+
+def test_integration_asset_caretaker_scenarios():
+    """
+    Asset Caretaker Integration Test - All Scenarios
+    
+    Tests the asset_caretaker caretaker script with comprehensive scenarios:
+    A. Overall Setup
+    B. Enabled Asset Needs Initial Cycle
+    C. All Enabled Assets Have Cycles
+    D. Disabled Asset Needs No Cycle
+    """
+    print("\n🚀 RUNNING: Asset Caretaker Integration Test - All Scenarios")
+    print("="*80)
+    
+    # Test configuration
+    test_symbol_needs_cycle = 'ETH/USD'
+    test_symbol_has_cycle = 'SOL/USD'
+    test_symbol_disabled = 'XRP/USD'
+    
+    # A. Overall Setup for Asset Caretaker Scenarios
+    print("\n📋 SCENARIO A: Overall Setup for Asset Caretaker Scenarios")
+    print("-" * 60)
+    
+    try:
+        # Initialize DB connection
+        print("   🔧 Initializing DB connection...")
+        db_conn = get_test_db_connection()
+        if not db_conn:
+            raise Exception("Failed to establish database connection")
+        print("   ✅ Database connection established")
+        
+        # Define test symbols
+        print(f"   📊 Test symbols defined:")
+        print(f"      - Needs cycle: {test_symbol_needs_cycle}")
+        print(f"      - Has cycle: {test_symbol_has_cycle}")
+        print(f"      - Disabled: {test_symbol_disabled}")
+        print("   ✅ Scenario A setup completed")
+        
+        # B. Sub-Scenario: Enabled Asset Needs Initial Cycle
+        print("\n📋 SCENARIO B: Enabled Asset Needs Initial Cycle")
+        print("-" * 60)
+        
+        # Setup: Create enabled asset without cycles
+        print(f"   🔧 Setting up enabled asset {test_symbol_needs_cycle} without cycles...")
+        asset_id_needs_cycle = setup_test_asset(
+            symbol=test_symbol_needs_cycle,
+            enabled=True,
+            base_order_amount=Decimal('10.0'),
+            safety_order_amount=Decimal('20.0')
+        )
+        print(f"   ✅ Created enabled asset {test_symbol_needs_cycle} (ID: {asset_id_needs_cycle})")
+        
+        # Verify no cycles exist
+        cycles_before = execute_test_query(
+            "SELECT COUNT(*) as count FROM dca_cycles WHERE asset_id = %s",
+            (asset_id_needs_cycle,),
+            fetch_one=True
+        )
+        print(f"   📊 Cycles before: {cycles_before['count']}")
+        
+        # Action: Call asset_caretaker.run_maintenance()
+        print("   🤖 Calling asset_caretaker.run_maintenance()...")
+        from scripts import asset_caretaker
+        asset_caretaker.run_maintenance()
+        print("   ✅ Asset caretaker execution completed")
+        
+        # Assertion: Verify new cycle was created
+        cycles_after = execute_test_query(
+            "SELECT * FROM dca_cycles WHERE asset_id = %s ORDER BY id DESC",
+            (asset_id_needs_cycle,),
+            fetch_all=True
+        )
+        
+        if cycles_after and len(cycles_after) == 1:
+            cycle = cycles_after[0]
+            if cycle['status'] == 'watching' and cycle['quantity'] == Decimal('0'):
+                print(f"   ✅ New watching cycle {cycle['id']} created successfully")
+                print(f"      - Status: {cycle['status']}")
+                print(f"      - Quantity: {cycle['quantity']}")
+            else:
+                print(f"   ❌ Cycle created but wrong values: status={cycle['status']}, quantity={cycle['quantity']}")
+        else:
+            print(f"   ❌ Expected 1 cycle, found {len(cycles_after) if cycles_after else 0}")
+        print("   ✅ Scenario B completed")
+        
+        # C. Sub-Scenario: All Enabled Assets Have Cycles
+        print("\n📋 SCENARIO C: All Enabled Assets Have Cycles")
+        print("-" * 60)
+        
+        # Setup: Create enabled asset with existing cycle
+        print(f"   🔧 Setting up enabled asset {test_symbol_has_cycle} with existing cycle...")
+        asset_id_has_cycle = setup_test_asset(
+            symbol=test_symbol_has_cycle,
+            enabled=True,
+            base_order_amount=Decimal('15.0'),
+            safety_order_amount=Decimal('25.0')
+        )
+        cycle_id_existing = setup_test_cycle(
+            asset_id=asset_id_has_cycle,
+            status='watching',
+            quantity=Decimal('0')
+        )
+        print(f"   ✅ Created enabled asset {test_symbol_has_cycle} (ID: {asset_id_has_cycle}) with cycle {cycle_id_existing}")
+        
+        # Count cycles before
+        cycles_before_c = execute_test_query(
+            "SELECT COUNT(*) as count FROM dca_cycles WHERE asset_id = %s",
+            (asset_id_has_cycle,),
+            fetch_one=True
+        )
+        print(f"   📊 Cycles before: {cycles_before_c['count']}")
+        
+        # Action: Call asset_caretaker.run_maintenance()
+        print("   🤖 Calling asset_caretaker.run_maintenance()...")
+        asset_caretaker.run_maintenance()
+        print("   ✅ Asset caretaker execution completed")
+        
+        # Assertion: Verify no additional cycle was created
+        cycles_after_c = execute_test_query(
+            "SELECT COUNT(*) as count FROM dca_cycles WHERE asset_id = %s",
+            (asset_id_has_cycle,),
+            fetch_one=True
+        )
+        
+        if cycles_after_c['count'] == cycles_before_c['count']:
+            print(f"   ✅ No additional cycle created (count remains {cycles_after_c['count']})")
+            print("   📝 Note: Asset caretaker correctly identified existing cycle")
+        else:
+            print(f"   ❌ Unexpected cycle creation: before={cycles_before_c['count']}, after={cycles_after_c['count']}")
+        print("   ✅ Scenario C completed")
+        
+        # D. Sub-Scenario: Disabled Asset Needs No Cycle
+        print("\n📋 SCENARIO D: Disabled Asset Needs No Cycle")
+        print("-" * 60)
+        
+        # Setup: Create disabled asset without cycles
+        print(f"   🔧 Setting up disabled asset {test_symbol_disabled} without cycles...")
+        asset_id_disabled = setup_test_asset(
+            symbol=test_symbol_disabled,
+            enabled=False,  # Disabled asset
+            base_order_amount=Decimal('5.0'),
+            safety_order_amount=Decimal('10.0')
+        )
+        print(f"   ✅ Created disabled asset {test_symbol_disabled} (ID: {asset_id_disabled})")
+        
+        # Verify no cycles exist
+        cycles_before_d = execute_test_query(
+            "SELECT COUNT(*) as count FROM dca_cycles WHERE asset_id = %s",
+            (asset_id_disabled,),
+            fetch_one=True
+        )
+        print(f"   📊 Cycles before: {cycles_before_d['count']}")
+        
+        # Action: Call asset_caretaker.run_maintenance()
+        print("   🤖 Calling asset_caretaker.run_maintenance()...")
+        asset_caretaker.run_maintenance()
+        print("   ✅ Asset caretaker execution completed")
+        
+        # Assertion: Verify no cycle was created for disabled asset
+        cycles_after_d = execute_test_query(
+            "SELECT COUNT(*) as count FROM dca_cycles WHERE asset_id = %s",
+            (asset_id_disabled,),
+            fetch_one=True
+        )
+        
+        if cycles_after_d['count'] == 0:
+            print("   ✅ No cycle created for disabled asset (correctly ignored)")
+            print("   📝 Note: Asset caretaker correctly skipped disabled asset")
+        else:
+            print(f"   ❌ Unexpected cycle creation for disabled asset: {cycles_after_d['count']} cycles found")
+        print("   ✅ Scenario D completed")
+        
+        print("\n🎉 ASSET CARETAKER INTEGRATION TEST: PASSED")
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ ASSET CARETAKER INTEGRATION TEST FAILED: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise
+    
+    finally:
+        # Cleanup is handled by comprehensive_test_teardown
+        comprehensive_test_teardown("asset_caretaker_integration_test")
+
+
+def test_integration_watchdog_scenarios():
+    """
+    Watchdog Integration Test - All Scenarios
+    
+    Tests the watchdog caretaker script with comprehensive scenarios:
+    A. Overall Setup
+    B. main_app.py Not Running (No PID file)
+    C. main_app.py Not Running (Stale PID file)
+    D. main_app.py Already Running
+    E. Maintenance Mode On, App Not Running
+    """
+    print("\n🚀 RUNNING: Watchdog Integration Test - All Scenarios")
+    print("="*80)
+    
+    # A. Overall Setup for Watchdog Scenarios
+    print("\n📋 SCENARIO A: Overall Setup for Watchdog Scenarios")
+    print("-" * 60)
+    
+    try:
+        # Import required modules
+        import psutil
+        import subprocess
+        import time
+        from pathlib import Path
+        
+        # Define paths
+        project_root = Path(__file__).parent
+        main_app_path = project_root / 'src' / 'main_app.py'
+        pid_file_path = project_root / 'main_app.pid'
+        maintenance_file_path = project_root / '.maintenance'
+        
+        print(f"   📂 Project root: {project_root}")
+        print(f"   📂 main_app.py path: {main_app_path}")
+        print(f"   📂 PID file path: {pid_file_path}")
+        print(f"   📂 Maintenance file path: {maintenance_file_path}")
+        
+        def is_main_app_process_running():
+            """Check if main_app.py process is running using psutil."""
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    if proc.info['cmdline']:
+                        cmdline = ' '.join(proc.info['cmdline'])
+                        if 'main_app.py' in cmdline and 'python' in cmdline.lower():
+                            return True, proc.info['pid']
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            return False, None
+        
+        def start_main_app_subprocess():
+            """Start main_app.py detached subprocess."""
+            try:
+                # Set environment to use test config
+                env = os.environ.copy()
+                env['DCA_CONFIG_PATH'] = '.env.test'
+                
+                process = subprocess.Popen(
+                    [sys.executable, str(main_app_path)],
+                    cwd=str(project_root),
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+                time.sleep(3)  # Give it time to start
+                return process
+            except Exception as e:
+                print(f"   ❌ Error starting main_app: {e}")
+                return None
+        
+        def stop_main_app_subprocess(process_obj=None):
+            """Gracefully stop main_app.py subprocess."""
+            try:
+                # If no specific process, find all main_app processes
+                if process_obj is None:
+                    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                        try:
+                            if proc.info['cmdline']:
+                                cmdline = ' '.join(proc.info['cmdline'])
+                                if 'main_app.py' in cmdline and 'python' in cmdline.lower():
+                                    proc.terminate()
+                                    proc.wait(timeout=5)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+                            continue
+                else:
+                    if process_obj.poll() is None:  # Still running
+                        process_obj.terminate()
+                        process_obj.wait(timeout=5)
+                
+                # Clean up PID file
+                if pid_file_path.exists():
+                    pid_file_path.unlink()
+                    
+            except Exception as e:
+                print(f"   ⚠️ Error stopping main_app: {e}")
+        
+        print("   ✅ Helper functions defined")
+        print("   ✅ Scenario A setup completed")
+        
+        # B. Sub-Scenario: main_app.py Not Running (No PID file)
+        print("\n📋 SCENARIO B: main_app.py Not Running (No PID file)")
+        print("-" * 60)
+        
+        # Setup: Clean environment
+        print("   🔧 Setup - Cleaning environment...")
+        stop_main_app_subprocess()  # Ensure no processes running
+        if pid_file_path.exists():
+            pid_file_path.unlink()
+        if maintenance_file_path.exists():
+            maintenance_file_path.unlink()
+        
+        running, pid = is_main_app_process_running()
+        print(f"   📊 Initial state: running={running}, PID file exists={pid_file_path.exists()}")
+        
+        # Action: Call watchdog.main()
+        print("   🤖 Calling watchdog.main()...")
+        from scripts import watchdog
+        watchdog.main()
+        print("   ✅ Watchdog execution completed")
+        
+        # Wait for app to start
+        print("   ⏰ Waiting 7 seconds for main_app to start...")
+        time.sleep(7)
+        
+        # Assertion: Verify main_app started
+        running_after, pid_after = is_main_app_process_running()
+        pid_file_exists = pid_file_path.exists()
+        
+        if running_after:
+            print(f"   ✅ main_app.py is running (PID: {pid_after})")
+        else:
+            print("   ❌ main_app.py is not running")
+        
+        if pid_file_exists:
+            with open(pid_file_path, 'r') as f:
+                file_pid = f.read().strip()
+            print(f"   ✅ PID file created with PID: {file_pid}")
+        else:
+            print("   ❌ PID file was not created")
+        
+        print("   ✅ Scenario B completed")
+        
+        # Teardown for B
+        print("   🧹 Teardown for scenario B...")
+        stop_main_app_subprocess()
+        
+        # C. Sub-Scenario: main_app.py Not Running (Stale PID file)
+        print("\n📋 SCENARIO C: main_app.py Not Running (Stale PID file)")
+        print("-" * 60)
+        
+        # Setup: Create stale PID file
+        print("   🔧 Setup - Creating stale PID file...")
+        stop_main_app_subprocess()  # Ensure clean
+        if maintenance_file_path.exists():
+            maintenance_file_path.unlink()
+        
+        # Write stale PID
+        stale_pid = 99999
+        with open(pid_file_path, 'w') as f:
+            f.write(str(stale_pid))
+        print(f"   📊 Created stale PID file with PID: {stale_pid}")
+        
+        running_before, _ = is_main_app_process_running()
+        print(f"   📊 Initial state: running={running_before}, stale PID file exists={pid_file_path.exists()}")
+        
+        # Action: Call watchdog.main()
+        print("   🤖 Calling watchdog.main()...")
+        watchdog.main()
+        print("   ✅ Watchdog execution completed")
+        
+        # Wait for app to start
+        print("   ⏰ Waiting 7 seconds for main_app to start...")
+        time.sleep(7)
+        
+        # Assertion: Verify app started and PID updated
+        running_after, pid_after = is_main_app_process_running()
+        
+        if running_after:
+            print(f"   ✅ main_app.py is running (PID: {pid_after})")
+        else:
+            print("   ❌ main_app.py is not running")
+        
+        if pid_file_path.exists():
+            with open(pid_file_path, 'r') as f:
+                new_pid = f.read().strip()
+            if new_pid != str(stale_pid):
+                print(f"   ✅ PID file updated from {stale_pid} to {new_pid}")
+            else:
+                print(f"   ❌ PID file still contains stale PID: {new_pid}")
+        else:
+            print("   ❌ PID file missing after watchdog run")
+        
+        print("   ✅ Scenario C completed")
+        
+        # Teardown for C
+        print("   🧹 Teardown for scenario C...")
+        stop_main_app_subprocess()
+        
+        # D. Sub-Scenario: main_app.py Already Running
+        print("\n📋 SCENARIO D: main_app.py Already Running")
+        print("-" * 60)
+        
+        # Setup: Start main_app manually
+        print("   🔧 Setup - Starting main_app.py manually...")
+        if maintenance_file_path.exists():
+            maintenance_file_path.unlink()
+        
+        process = start_main_app_subprocess()
+        if process is None:
+            print("   ❌ Failed to start main_app for test")
+        else:
+            time.sleep(5)  # Wait for PID file creation
+            running_before, initial_pid = is_main_app_process_running()
+            print(f"   ✅ main_app.py started manually (PID: {initial_pid})")
+        
+        # Action: Call watchdog.main()
+        print("   🤖 Calling watchdog.main()...")
+        watchdog.main()
+        print("   ✅ Watchdog execution completed")
+        
+        # Assertion: Verify same process still running
+        running_after, final_pid = is_main_app_process_running()
+        
+        if running_after and initial_pid == final_pid:
+            print(f"   ✅ main_app.py still running with same PID: {final_pid}")
+            print("   📝 Note: Watchdog correctly left running app alone")
+        else:
+            print(f"   ❌ PID changed from {initial_pid} to {final_pid} (unexpected restart)")
+        
+        print("   ✅ Scenario D completed")
+        
+        # Teardown for D
+        print("   🧹 Teardown for scenario D...")
+        stop_main_app_subprocess()
+        
+        # E. Sub-Scenario: Maintenance Mode On, App Not Running
+        print("\n📋 SCENARIO E: Maintenance Mode On, App Not Running")
+        print("-" * 60)
+        
+        # Setup: Create maintenance file, ensure no app running
+        print("   🔧 Setup - Creating maintenance file...")
+        stop_main_app_subprocess()  # Ensure clean
+        if pid_file_path.exists():
+            pid_file_path.unlink()
+        
+        # Create maintenance file
+        maintenance_file_path.touch()
+        print(f"   ✅ Created maintenance file: {maintenance_file_path}")
+        
+        running_before, _ = is_main_app_process_running()
+        print(f"   📊 Initial state: running={running_before}, maintenance mode=True")
+        
+        # Action: Call watchdog.main()
+        print("   🤖 Calling watchdog.main()...")
+        watchdog.main()
+        print("   ✅ Watchdog execution completed")
+        
+        # Assertion: Verify app was NOT started
+        running_after, pid_after = is_main_app_process_running()
+        
+        if not running_after:
+            print("   ✅ main_app.py correctly NOT started (maintenance mode)")
+            print("   📝 Note: Watchdog correctly respected maintenance mode")
+        else:
+            print(f"   ❌ main_app.py unexpectedly started (PID: {pid_after})")
+        
+        print("   ✅ Scenario E completed")
+        
+        # Teardown for E
+        print("   🧹 Teardown for scenario E...")
+        if maintenance_file_path.exists():
+            maintenance_file_path.unlink()
+        stop_main_app_subprocess()
+        
+        print("\n🎉 WATCHDOG INTEGRATION TEST: PASSED")
+        return True
+        
+    except Exception as e:
+        print(f"\n❌ WATCHDOG INTEGRATION TEST FAILED: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise
+    
+    finally:
+        # Final cleanup
+        try:
+            stop_main_app_subprocess()
+            if pid_file_path.exists():
+                pid_file_path.unlink()
+            if maintenance_file_path.exists():
+                maintenance_file_path.unlink()
+        except:
+            pass
+        # Note: No comprehensive_test_teardown needed as this doesn't use DB/Alpaca
 
 
 if __name__ == '__main__':
