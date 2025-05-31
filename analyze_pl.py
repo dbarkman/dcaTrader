@@ -6,17 +6,23 @@ This script analyzes both realized P/L from completed cycles and unrealized P/L
 from active positions. Uses dca_orders data to reinforce calculations where needed.
 Integrates TradingView technical ratings for active cycles.
 
-Usage: python analyze_pl.py
+Usage: python analyze_pl.py [interval]
+  interval: TradingView interval (1m, 5m, 15m, 30m, 1h, 2h, 4h, 1d, 1W, 1M)
+            Default: 1h
 """
 
 import sys
 import os
+import argparse
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from utils.db_utils import execute_query
 from decimal import Decimal
 from utils.alpaca_client_rest import get_trading_client
 from datetime import datetime
+
+# Global variable to store the configured interval
+TRADINGVIEW_INTERVAL = None
 
 # Color codes for terminal output
 class Colors:
@@ -93,6 +99,28 @@ def get_tradingview_rating(symbol):
         # Import here to avoid dependency issues if not installed
         from tradingview_ta import TA_Handler, Interval, Exchange
         
+        # Map string intervals to Interval constants
+        interval_map = {
+            '1m': Interval.INTERVAL_1_MINUTE,
+            '5m': Interval.INTERVAL_5_MINUTES,
+            '15m': Interval.INTERVAL_15_MINUTES,
+            '30m': Interval.INTERVAL_30_MINUTES,
+            '1h': Interval.INTERVAL_1_HOUR,
+            '2h': Interval.INTERVAL_2_HOURS,
+            '4h': Interval.INTERVAL_4_HOURS,
+            '1d': Interval.INTERVAL_1_DAY,
+            '1W': Interval.INTERVAL_1_WEEK,
+            '1M': Interval.INTERVAL_1_MONTH
+        }
+        
+        # Get the interval from global variable or default to 1h
+        interval_str = TRADINGVIEW_INTERVAL or '1h'
+        if interval_str not in interval_map:
+            print(f'{colored(f"⚠️  Invalid interval {interval_str}. Using 1h default.", Colors.YELLOW)}')
+            interval_str = '1h'
+        
+        tv_interval = interval_map[interval_str]
+        
         # Convert symbol format and handle different quote currencies
         base_symbol = symbol.split('/')[0]
         quote_symbol = symbol.split('/')[1] if '/' in symbol else 'USD'
@@ -137,7 +165,7 @@ def get_tradingview_rating(symbol):
             symbol=tv_symbol,
             screener=screener,
             exchange=exchange,
-            interval=Interval.INTERVAL_1_HOUR
+            interval=tv_interval
         )
         
         # Get analysis
@@ -183,7 +211,7 @@ def get_tradingview_rating(symbol):
                     symbol=fallback_symbol,
                     screener="crypto",
                     exchange="COINBASE",  # Try Coinbase for USD pairs
-                    interval=Interval.INTERVAL_1_HOUR
+                    interval=tv_interval
                 )
                 analysis = handler.get_analysis()
                 recommendation = analysis.summary.get('RECOMMENDATION', 'NEUTRAL')
@@ -574,6 +602,27 @@ def analyze_market_sentiment():
             # Get the full analysis including indicators
             from tradingview_ta import TA_Handler, Interval
             
+            # Map string intervals to Interval constants
+            interval_map = {
+                '1m': Interval.INTERVAL_1_MINUTE,
+                '5m': Interval.INTERVAL_5_MINUTES,
+                '15m': Interval.INTERVAL_15_MINUTES,
+                '30m': Interval.INTERVAL_30_MINUTES,
+                '1h': Interval.INTERVAL_1_HOUR,
+                '2h': Interval.INTERVAL_2_HOURS,
+                '4h': Interval.INTERVAL_4_HOURS,
+                '1d': Interval.INTERVAL_1_DAY,
+                '1W': Interval.INTERVAL_1_WEEK,
+                '1M': Interval.INTERVAL_1_MONTH
+            }
+            
+            # Get the interval from global variable or default to 1h
+            interval_str = TRADINGVIEW_INTERVAL or '1h'
+            if interval_str not in interval_map:
+                interval_str = '1h'
+            
+            tv_interval = interval_map[interval_str]
+            
             # Convert symbol format for TradingView
             base_symbol = symbol.split('/')[0]
             tv_symbol = f"{base_symbol}USDT"
@@ -582,7 +631,7 @@ def analyze_market_sentiment():
                 symbol=tv_symbol,
                 screener="crypto",
                 exchange="BINANCE",
-                interval=Interval.INTERVAL_1_HOUR
+                interval=tv_interval
             )
             
             analysis = handler.get_analysis()
@@ -754,6 +803,11 @@ def main():
     print(f'{colored("🤖 DCA TRADING BOT - P/L ANALYSIS", Colors.HEADER + Colors.BOLD)}')
     print(colored('=' * 50, Colors.HEADER))
     
+    # Display TradingView interval info
+    interval_str = TRADINGVIEW_INTERVAL or '1h'
+    print(f'{colored(f"📊 TradingView Interval: {interval_str}", Colors.BLUE)}')
+    print()
+    
     try:
         # Analyze completed cycles
         realized_pl, completed_cycles = analyze_completed_cycles()
@@ -784,4 +838,41 @@ def main():
         print(f'{colored("Make sure the DCA bot database is accessible and configured properly.", Colors.YELLOW)}')
 
 if __name__ == '__main__':
+    # Valid intervals for TradingView
+    valid_intervals = ['1m', '5m', '15m', '30m', '1h', '2h', '4h', '1d', '1W', '1M']
+    
+    intervals_str = ', '.join(valid_intervals)
+    epilog_text = """
+Examples:
+  python analyze_pl.py       # Use default 1h interval
+  python analyze_pl.py 4h    # Use 4-hour interval  
+  python analyze_pl.py 1d    # Use daily interval
+
+Valid intervals: """ + intervals_str + """
+    """
+    
+    parser = argparse.ArgumentParser(
+        description='DCA Trading Bot P/L Analysis with configurable TradingView interval',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=epilog_text
+    )
+    
+    help_text = f'TradingView interval (default: 1h). Valid options: {intervals_str}'
+    parser.add_argument(
+        'interval', 
+        nargs='?', 
+        default='1h', 
+        help=help_text
+    )
+    args = parser.parse_args()
+    
+    # Validate interval
+    if args.interval not in valid_intervals:
+        print(colored(f"❌ Invalid interval: {args.interval}", Colors.RED))
+        print(colored(f"Valid intervals: {intervals_str}", Colors.YELLOW))
+        sys.exit(1)
+    
+    # Set the global variable
+    TRADINGVIEW_INTERVAL = args.interval
+    
     main() 

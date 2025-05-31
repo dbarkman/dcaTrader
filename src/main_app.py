@@ -34,6 +34,10 @@ import mysql.connector
 from config import get_config
 from utils.logging_config import setup_main_app_logging, get_asset_logger, log_asset_lifecycle_event
 from utils.notifications import alert_order_placed, alert_order_filled, alert_system_error, alert_critical_error
+from utils.discord_notifications import (
+    discord_order_placed, discord_order_filled, discord_cycle_completed, 
+    discord_system_error, discord_system_alert
+)
 
 # Import our database models and utilities
 from utils.db_utils import get_db_connection, execute_query
@@ -316,6 +320,15 @@ def check_and_place_base_order(quote):
             logger.info(f"   Quantity: {format_quantity(order_quantity)}")
             logger.info(f"   Limit Price: {format_price(limit_price)}")
             logger.info(f"   Time in Force: GTC")
+            
+            # Send Discord notification for order placement
+            discord_order_placed(
+                asset_symbol=symbol,
+                order_type="Base Order",
+                order_id=str(order.id),
+                quantity=float(order_quantity),
+                price=float(limit_price)
+            )
         else:
             logger.error(f"❌ Failed to place base order for {symbol}")
             
@@ -501,6 +514,15 @@ def check_and_place_safety_order(quote):
             logger.info(f"   Quantity: {format_quantity(order_quantity)}")
             logger.info(f"   Limit Price: {format_price(limit_price)}")
             logger.info(f"   Time in Force: GTC")
+            
+            # Send Discord notification for safety order placement
+            discord_order_placed(
+                asset_symbol=symbol,
+                order_type=f"Safety Order #{latest_cycle.safety_orders + 1}",
+                order_id=str(order.id),
+                quantity=float(order_quantity),
+                price=float(limit_price)
+            )
         else:
             logger.error(f"❌ Failed to place safety order for {symbol}")
             
@@ -1126,6 +1148,17 @@ async def update_cycle_on_buy_fill(order, trade_update):
                 logger.info(f"🚀 CYCLE_START: {symbol} - New DCA cycle initiated with base order")
             else:
                 logger.info(f"🔄 CYCLE_CONTINUE: {symbol} - Safety order #{final_safety_orders} added to active cycle")
+            
+            # Send Discord notification for successful order fill
+            order_type = "Safety Order" if is_safety_order else "Base Order"
+            discord_order_filled(
+                asset_symbol=symbol,
+                order_type=order_type,
+                order_id=str(order_id),
+                fill_price=float(avg_fill_price),
+                quantity=float(filled_qty),
+                is_full_fill=True
+            )
         else:
             logger.error(f"❌ Failed to update cycle database for {symbol}")
             logger.error(f"❌ CYCLE_ERROR: {symbol} - Failed to update cycle after buy fill")
@@ -1368,6 +1401,25 @@ async def update_cycle_on_sell_fill(order, trade_update):
         logger.info(f"   🔄 Previous Cycle: {current_cycle.id} (complete)")
         logger.info(f"   ❄️  New Cooldown Cycle: {new_cooldown_cycle.id}")
         logger.info(f"   ⏱️  Cooldown Period: {asset_config.cooldown_period} seconds")
+        
+        # Send Discord notifications for sell order fill and cycle completion
+        # First, send Discord notification for the sell order fill (with user mention)
+        discord_order_filled(
+            asset_symbol=symbol,
+            order_type="Take-Profit",
+            order_id=str(order.id),
+            fill_price=float(avg_fill_price),
+            quantity=float(filled_qty),
+            is_full_fill=True
+        )
+        
+        # Then, send Discord notification for cycle completion (with user mention)
+        total_profit = profit_amount * current_cycle.quantity
+        discord_cycle_completed(
+            asset_symbol=symbol,
+            profit=float(total_profit),
+            profit_percent=float(profit_percent)
+        )
         
         logger.info(f"✅ Phase 8 SELL fill processing completed successfully for {symbol}")
         
