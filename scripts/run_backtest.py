@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Phase 4: Backtesting Engine - Broker Simulator & Simulated State Management
+Enhanced DCA Backtesting Engine - Phase 5
+Includes broker simulation, portfolio management, cooldown management, 
+stale order cancellation, and performance reporting.
 
 This script creates a complete backtesting engine that:
 1. Reads historical 1-minute bars from the database
@@ -17,11 +19,12 @@ import sys
 import os
 import argparse
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Dict, List, Iterator, Optional, Any
 from dataclasses import dataclass
 import traceback
+import asyncio
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -58,6 +61,45 @@ except Exception as e:
     update_cycle_on_buy_fill_live = None
     update_cycle_on_sell_fill_live = None
 
+# Phase 5 Configuration Constants
+STALE_ORDER_THRESHOLD_MINUTES = 5  # Cancel stale BUY limit orders after 5 minutes
+STUCK_MARKET_SELL_TIMEOUT_SECONDS = 120  # Cancel stuck SELL market orders after 2 minutes
+BAR_INTERVAL_MINUTES = 1  # Assuming 1-minute bars for time calculations
+
+# Convert time thresholds to bar counts (for 1-minute bars)
+STALE_ORDER_THRESHOLD_BARS = STALE_ORDER_THRESHOLD_MINUTES
+STUCK_MARKET_SELL_TIMEOUT_BARS = STUCK_MARKET_SELL_TIMEOUT_SECONDS // 60  # Convert to minutes
+
+@dataclass
+class CompletedTrade:
+    """Represents a completed trading cycle for performance reporting."""
+    asset_symbol: str
+    entry_timestamp: datetime
+    exit_timestamp: datetime
+    entry_price: Decimal
+    exit_price: Decimal
+    quantity: Decimal
+    realized_pnl: Decimal
+    trade_type: str  # 'take_profit', 'stop_loss', etc.
+    safety_orders_used: int
+
+@dataclass
+class PerformanceMetrics:
+    """Container for backtesting performance metrics."""
+    total_realized_pnl: Decimal
+    total_unrealized_pnl: Decimal
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    win_rate: Decimal
+    average_pnl_per_trade: Decimal
+    max_drawdown: Decimal
+    total_fees_paid: Decimal
+    final_portfolio_value: Decimal
+    
+    @property
+    def total_pnl(self) -> Decimal:
+        return self.total_realized_pnl + self.total_unrealized_pnl
 
 @dataclass
 class SimulatedOrder:
@@ -78,21 +120,18 @@ class SimulatedOrder:
 
 class SimulatedPortfolio:
     """
-    Manages cash and asset positions for backtesting simulation.
+    Manages simulated portfolio state for backtesting.
+    Tracks cash balance, positions, and performance metrics.
     """
     
     def __init__(self, starting_cash: Decimal = Decimal('10000.0')):
-        """
-        Initialize the simulated portfolio.
-        
-        Args:
-            starting_cash: Initial cash balance for backtesting
-        """
+        """Initialize portfolio with starting cash."""
         self.starting_cash = starting_cash
-        self.cash = starting_cash
-        self.positions: Dict[str, Dict[str, Decimal]] = {}  # symbol -> {'quantity': Decimal, 'average_entry_price': Decimal}
-        self.total_fees_paid = Decimal('0.0')
+        self.cash_balance = starting_cash
+        self.positions: Dict[str, Dict[str, Decimal]] = {}  # symbol -> {qty, weighted_avg_price}
         self.realized_pnl = Decimal('0.0')
+        self.total_fees = Decimal('0.0')
+        self.completed_trades: List[CompletedTrade] = []  # Track completed trades for reporting
         self.logger = logging.getLogger('portfolio_sim')
         
     def update_on_buy(self, symbol: str, quantity: Decimal, price: Decimal, fee: Decimal = Decimal('0.0')) -> None:
@@ -100,106 +139,115 @@ class SimulatedPortfolio:
         Update portfolio on a buy transaction.
         
         Args:
-            symbol: Trading symbol (e.g., 'BTC/USD')
+            symbol: Asset symbol
             quantity: Quantity purchased
-            price: Price per unit
+            price: Purchase price per unit
             fee: Transaction fee
         """
         total_cost = quantity * price + fee
         
-        if total_cost > self.cash:
-            self.logger.warning(f"💸 Insufficient cash for buy: need ${total_cost}, have ${self.cash}")
+        # Check if we have sufficient cash
+        if total_cost > self.cash_balance:
+            self.logger.warning(f"💸 Insufficient cash for buy: need ${total_cost:.3f}, have ${self.cash_balance:.3f}")
             return
             
-        # Update cash
-        self.cash -= total_cost
-        self.total_fees_paid += fee
+        # Update cash balance
+        self.cash_balance -= total_cost
+        self.total_fees += fee
         
-        # Update position
+        # Update position with weighted average
         if symbol not in self.positions:
             self.positions[symbol] = {
-                'quantity': Decimal('0'),
-                'average_entry_price': Decimal('0')
+                'quantity': quantity,
+                'weighted_avg_price': price
             }
-            
-        current_qty = self.positions[symbol]['quantity']
-        current_avg = self.positions[symbol]['average_entry_price']
-        
-        # Calculate new average entry price
-        if current_qty == 0:
-            new_avg_price = price
         else:
-            total_value = (current_qty * current_avg) + (quantity * price)
+            current_qty = self.positions[symbol]['quantity']
+            current_avg_price = self.positions[symbol]['weighted_avg_price']
+            
+            # Calculate new weighted average
+            total_value = (current_qty * current_avg_price) + (quantity * price)
             new_quantity = current_qty + quantity
             new_avg_price = total_value / new_quantity
             
-        self.positions[symbol]['quantity'] = current_qty + quantity
-        self.positions[symbol]['average_entry_price'] = new_avg_price
-        
-        self.logger.info(f"📊 BUY: {quantity} {symbol} @ ${price} (total: ${total_cost:.2f})")
-        self.logger.info(f"💰 Position: {self.positions[symbol]['quantity']} @ avg ${new_avg_price:.2f}")
-        self.logger.info(f"💵 Cash remaining: ${self.cash:.2f}")
-        
+            self.positions[symbol] = {
+                'quantity': new_quantity,
+                'weighted_avg_price': new_avg_price
+            }
+            
+        self.logger.info(f"💰 BUY: {quantity} {symbol} @ ${price:.2f} | "
+                        f"Position: {self.positions[symbol]['quantity']:.6f} @ "
+                        f"${self.positions[symbol]['weighted_avg_price']:.2f} avg | "
+                        f"Cash: ${self.cash_balance:.2f}")
+
     def update_on_sell(self, symbol: str, quantity: Decimal, price: Decimal, fee: Decimal = Decimal('0.0')) -> Decimal:
         """
         Update portfolio on a sell transaction.
         
         Args:
-            symbol: Trading symbol
+            symbol: Asset symbol
             quantity: Quantity sold
-            price: Price per unit
+            price: Sale price per unit
             fee: Transaction fee
             
         Returns:
-            Realized P/L from this trade
+            Realized P/L from this sale
         """
-        if symbol not in self.positions or self.positions[symbol]['quantity'] < quantity:
-            self.logger.warning(f"💸 Insufficient position for sell: need {quantity}, have {self.get_position_qty(symbol)}")
+        if symbol not in self.positions:
+            self.logger.warning(f"💸 Cannot sell {symbol}: no position exists")
             return Decimal('0.0')
             
-        total_proceeds = (quantity * price) - fee
-        
+        current_qty = self.positions[symbol]['quantity']
+        if quantity > current_qty:
+            self.logger.warning(f"💸 Insufficient position for sell: need {quantity}, have {current_qty}")
+            return Decimal('0.0')
+            
         # Calculate realized P/L
-        avg_entry_price = self.positions[symbol]['average_entry_price']
-        trade_pnl = (price - avg_entry_price) * quantity - fee
+        avg_price = self.positions[symbol]['weighted_avg_price']
+        sale_proceeds = quantity * price - fee
+        cost_basis = quantity * avg_price
+        realized_pnl = sale_proceeds - cost_basis
         
         # Update cash and fees
-        self.cash += total_proceeds
-        self.total_fees_paid += fee
-        self.realized_pnl += trade_pnl
+        self.cash_balance += sale_proceeds
+        self.total_fees += fee
+        self.realized_pnl += realized_pnl
         
         # Update position
-        self.positions[symbol]['quantity'] -= quantity
-        
-        # If position is fully closed, remove it
-        if self.positions[symbol]['quantity'] == 0:
+        remaining_qty = current_qty - quantity
+        if remaining_qty <= Decimal('0.000001'):  # Close position if very small remainder
             del self.positions[symbol]
+            self.logger.info(f"📊 Position closed for {symbol}")
+        else:
+            self.positions[symbol]['quantity'] = remaining_qty
+            # Keep same weighted average price for remaining position
             
-        self.logger.info(f"📊 SELL: {quantity} {symbol} @ ${price} (proceeds: ${total_proceeds:.2f})")
-        self.logger.info(f"💰 Trade P/L: ${trade_pnl:.2f} (entry: ${avg_entry_price:.2f})")
-        self.logger.info(f"💵 Cash: ${self.cash:.2f}, Total P/L: ${self.realized_pnl:.2f}")
-        
-        return trade_pnl
-        
+        self.logger.info(f"💰 SELL: {quantity} {symbol} @ ${price:.2f} | "
+                        f"Realized P/L: ${realized_pnl:.2f} | "
+                        f"Remaining: {remaining_qty:.6f} | "
+                        f"Cash: ${self.cash_balance:.2f}")
+                        
+        return realized_pnl
+
     def get_position_qty(self, symbol: str) -> Decimal:
         """Get current position quantity for a symbol."""
-        return self.positions.get(symbol, {}).get('quantity', Decimal('0'))
-        
+        return self.positions.get(symbol, {}).get('quantity', Decimal('0.0'))
+
     def get_position_avg_price(self, symbol: str) -> Optional[Decimal]:
-        """Get average entry price for a position."""
-        return self.positions.get(symbol, {}).get('average_entry_price')
-        
+        """Get weighted average price for a position."""
+        return self.positions.get(symbol, {}).get('weighted_avg_price')
+
     def get_portfolio_value(self, current_prices: Dict[str, Decimal]) -> Decimal:
         """
         Calculate total portfolio value including cash and positions.
         
         Args:
-            current_prices: Dict mapping symbols to current prices
+            current_prices: Dict of symbol -> current_price
             
         Returns:
             Total portfolio value
         """
-        total_value = self.cash
+        total_value = self.cash_balance
         
         for symbol, position in self.positions.items():
             if symbol in current_prices:
@@ -207,55 +255,71 @@ class SimulatedPortfolio:
                 total_value += position_value
                 
         return total_value
-        
+
     def get_unrealized_pnl(self, current_prices: Dict[str, Decimal]) -> Decimal:
-        """Calculate unrealized P/L for open positions."""
+        """
+        Calculate unrealized P/L for open positions.
+        
+        Args:
+            current_prices: Dict of symbol -> current_price
+            
+        Returns:
+            Total unrealized P/L
+        """
         unrealized_pnl = Decimal('0.0')
         
         for symbol, position in self.positions.items():
             if symbol in current_prices:
                 current_value = position['quantity'] * current_prices[symbol]
-                cost_basis = position['quantity'] * position['average_entry_price']
-                unrealized_pnl += current_value - cost_basis
+                cost_basis = position['quantity'] * position['weighted_avg_price']
+                unrealized_pnl += (current_value - cost_basis)
                 
         return unrealized_pnl
         
+    def record_completed_trade(self, trade: CompletedTrade) -> None:
+        """Record a completed trade for performance reporting."""
+        self.completed_trades.append(trade)
+        self.logger.info(f"📊 Trade completed: {trade.trade_type} | "
+                        f"P/L: ${trade.realized_pnl:.2f} | "
+                        f"Safety orders: {trade.safety_orders_used}")
+
     def log_portfolio_summary(self, current_prices: Dict[str, Decimal] = None) -> None:
-        """Log current portfolio status."""
-        current_prices = current_prices or {}
+        """Log detailed portfolio summary."""
+        if current_prices is None:
+            current_prices = {}
+            
+        portfolio_value = self.get_portfolio_value(current_prices)
+        unrealized_pnl = self.get_unrealized_pnl(current_prices)
+        total_pnl = self.realized_pnl + unrealized_pnl
         
         self.logger.info("💼 PORTFOLIO SUMMARY:")
-        self.logger.info(f"   💵 Cash: ${self.cash:.2f}")
-        self.logger.info(f"   💰 Realized P/L: ${self.realized_pnl:.2f}")
-        self.logger.info(f"   💸 Total Fees: ${self.total_fees_paid:.2f}")
+        self.logger.info(f"   💰 Cash Balance: ${self.cash_balance:.2f}")
+        self.logger.info(f"   🎯 Total Portfolio Value: ${portfolio_value:.2f}")
+        self.logger.info(f"   📈 Realized P/L: ${self.realized_pnl:.2f}")
+        self.logger.info(f"   📊 Unrealized P/L: ${unrealized_pnl:.2f}")
+        self.logger.info(f"   🏆 Total P/L: ${total_pnl:.2f} ({total_pnl/self.starting_cash*100:.2f}%)")
+        self.logger.info(f"   💸 Total Fees: ${self.total_fees:.2f}")
+        self.logger.info(f"   📊 Completed Trades: {len(self.completed_trades)}")
         
+        # Log positions
         if self.positions:
-            self.logger.info("   📊 Positions:")
+            self.logger.info("   🎯 OPEN POSITIONS:")
             for symbol, position in self.positions.items():
-                qty = position['quantity']
-                avg_price = position['average_entry_price']
-                current_price = current_prices.get(symbol)
+                current_price = current_prices.get(symbol, Decimal('0.0'))
+                position_value = position['quantity'] * current_price if current_price > 0 else Decimal('0.0')
+                position_pnl = position_value - (position['quantity'] * position['weighted_avg_price'])
                 
-                if current_price:
-                    current_value = qty * current_price
-                    cost_basis = qty * avg_price
-                    unrealized_pnl = current_value - cost_basis
-                    self.logger.info(f"      {symbol}: {qty} @ ${avg_price:.2f} (current: ${current_price:.2f}, P/L: ${unrealized_pnl:.2f})")
-                else:
-                    self.logger.info(f"      {symbol}: {qty} @ ${avg_price:.2f}")
-        else:
-            self.logger.info("   📊 No open positions")
-            
-        if current_prices:
-            total_value = self.get_portfolio_value(current_prices)
-            total_return = total_value - self.starting_cash
-            total_return_pct = (total_return / self.starting_cash) * 100
-            self.logger.info(f"   🎯 Total Value: ${total_value:.2f} (Return: ${total_return:.2f}, {total_return_pct:.2f}%)")
+                self.logger.info(f"      {symbol}: {position['quantity']:.6f} @ "
+                               f"${position['weighted_avg_price']:.2f} avg | "
+                               f"Current: ${current_price:.2f} | "
+                               f"Value: ${position_value:.2f} | "
+                               f"P/L: ${position_pnl:.2f}")
 
 
 class BrokerSimulator:
     """
     Simulates order execution based on historical bar data.
+    Enhanced with stale/stuck order cancellation for Phase 5.
     """
     
     def __init__(self, portfolio: SimulatedPortfolio, slippage_pct: Decimal = Decimal('0.05')):
@@ -314,29 +378,101 @@ class BrokerSimulator:
     def process_bar_fills(self, bar: Dict[str, Any], current_timestamp: datetime) -> List[Dict]:
         """
         Process potential fills for open orders based on current bar data.
+        Also handles stale/stuck order cancellation.
         
         Args:
             bar: Historical bar data with OHLC prices
             current_timestamp: Current bar timestamp
             
         Returns:
-            List of simulated fill events
+            List of simulated fill events and cancellation events
         """
-        fills = []
+        events = []
         orders_to_remove = []
         
-        # Create a copy to iterate over since we might modify the list
-        for order in self.open_orders[:]:
+        # First, check for stale/stuck orders that need cancellation
+        stale_cancel_events = self._check_stale_orders(current_timestamp)
+        events.extend(stale_cancel_events)
+        
+        # Then check for fills on remaining orders
+        for order in self.open_orders[:]:  # Create copy since we modify the list
+            if order.status == 'canceled':
+                orders_to_remove.append(order)
+                continue
+                
             fill_event = self._check_order_fill(order, bar, current_timestamp)
             if fill_event:
-                fills.append(fill_event)
+                events.append(fill_event)
                 orders_to_remove.append(order)
                 
-        # Remove filled orders
+        # Remove filled/canceled orders
         for order in orders_to_remove:
-            self.open_orders.remove(order)
+            if order in self.open_orders:
+                self.open_orders.remove(order)
             
-        return fills
+        return events
+        
+    def _check_stale_orders(self, current_timestamp: datetime) -> List[Dict]:
+        """
+        Check for stale/stuck orders that should be canceled.
+        
+        Args:
+            current_timestamp: Current bar timestamp
+            
+        Returns:
+            List of cancellation events
+        """
+        cancellation_events = []
+        
+        for order in self.open_orders[:]:  # Copy list since we modify it
+            if order.status != 'open':
+                continue
+                
+            # Calculate order age in minutes
+            order_age_minutes = (current_timestamp - order.created_at_bar_timestamp).total_seconds() / 60
+            
+            should_cancel = False
+            cancel_reason = ""
+            
+            # Check for stale BUY limit orders
+            if (order.side == 'BUY' and 
+                order.order_type == 'LIMIT' and 
+                order_age_minutes >= STALE_ORDER_THRESHOLD_MINUTES):
+                should_cancel = True
+                cancel_reason = "stale_buy_limit"
+                
+            # Check for stuck SELL market orders
+            elif (order.side == 'SELL' and 
+                  order.order_type == 'MARKET' and 
+                  order_age_minutes >= (STUCK_MARKET_SELL_TIMEOUT_SECONDS / 60)):
+                should_cancel = True
+                cancel_reason = "stuck_sell_market"
+                
+            if should_cancel:
+                # Mark order as canceled
+                order.status = 'canceled'
+                
+                # Create cancellation event (mimicking Alpaca TradeUpdate for cancellation)
+                cancel_event = {
+                    'event': 'order_canceled',
+                    'id': order.sim_order_id,
+                    'symbol': order.asset_symbol,
+                    'side': order.side.lower(),
+                    'filled_qty': '0',  # Assume no partial fills for simplicity
+                    'status': 'canceled',
+                    'order_type': order.order_type.lower(),
+                    'created_at': order.created_at_bar_timestamp.isoformat(),
+                    'canceled_at': current_timestamp.isoformat(),
+                    'cancel_reason': cancel_reason
+                }
+                
+                cancellation_events.append(cancel_event)
+                
+                self.logger.info(f"❌ ORDER CANCELED: {cancel_reason} - "
+                               f"{order.side} {order.order_type} {order.asset_symbol} "
+                               f"(Age: {order_age_minutes:.1f}min, ID: {order.sim_order_id})")
+                
+        return cancellation_events
         
     def _check_order_fill(self, order: SimulatedOrder, bar: Dict[str, Any], current_timestamp: datetime) -> Optional[Dict]:
         """
@@ -392,6 +528,7 @@ class BrokerSimulator:
                 
             # Create fill event (mimicking Alpaca TradeUpdate structure)
             fill_event = {
+                'event': 'order_filled',
                 'id': order.sim_order_id,
                 'symbol': order.asset_symbol,
                 'side': order.side.lower(),
@@ -423,6 +560,10 @@ class BrokerSimulator:
             if order.sim_order_id == order_id:
                 return order.status
         return None
+        
+    def get_open_order_count(self) -> int:
+        """Get count of open orders."""
+        return len([order for order in self.open_orders if order.status == 'open'])
 
 
 class HistoricalDataFeeder:
@@ -508,6 +649,7 @@ class HistoricalDataFeeder:
 class BacktestSimulation:
     """
     Enhanced backtesting simulation with broker simulator integration.
+    Includes cooldown management and performance tracking for Phase 5.
     """
     
     def __init__(self, asset_config: DcaAsset, portfolio: SimulatedPortfolio, broker: BrokerSimulator):
@@ -545,6 +687,41 @@ class BacktestSimulation:
         self.current_alpaca_position = None  # Mock position for base order checks
         self.order_counter = 0  # For generating simulated order IDs
         
+        # Performance tracking
+        self.completed_cycles: List[CompletedTrade] = []
+        self.cycle_entry_timestamp = None  # Track when current cycle started
+        self.cycle_entry_price = None  # Track entry price for P/L calculation
+        
+    def check_cooldown_expiry(self, current_timestamp: datetime) -> None:
+        """
+        Check if current cycle's cooldown period has expired.
+        
+        Args:
+            current_timestamp: Current bar timestamp
+        """
+        if self.current_cycle.status == 'cooldown' and self.current_cycle.completed_at:
+            cooldown_duration = timedelta(seconds=self.asset_config.cooldown_period)
+            cooldown_end = self.current_cycle.completed_at + cooldown_duration
+            
+            if current_timestamp >= cooldown_end:
+                self.logger.info(f"⏰ Cooldown expired for {self.asset_config.asset_symbol}. Status: cooldown → watching")
+                self.current_cycle.status = 'watching'
+                self.current_cycle.completed_at = None
+                # Reset cycle for new trading opportunity
+                self._reset_cycle_for_new_trade()
+    
+    def _reset_cycle_for_new_trade(self) -> None:
+        """Reset cycle state for a new trading opportunity."""
+        self.current_cycle.quantity = Decimal('0')
+        self.current_cycle.average_purchase_price = Decimal('0')
+        self.current_cycle.safety_orders = 0
+        self.current_cycle.latest_order_id = None
+        self.current_cycle.latest_order_created_at = None
+        self.current_cycle.last_order_fill_price = None
+        self.current_cycle.highest_trailing_price = None
+        self.cycle_entry_timestamp = None
+        self.cycle_entry_price = None
+
     def get_simulated_position(self, symbol: str):
         """
         Create a mock Alpaca position object from simulated portfolio data.
@@ -568,6 +745,57 @@ class BacktestSimulation:
                     
             return MockPosition(position_qty, avg_price)
         return None
+        
+    async def process_event(self, event: Dict, symbol: str, current_timestamp: datetime) -> None:
+        """
+        Process either a fill event or cancellation event.
+        
+        Args:
+            event: Event from broker simulator (fill or cancellation)
+            symbol: Trading symbol
+            current_timestamp: Current bar timestamp
+        """
+        event_type = event.get('event', 'order_filled')  # Default to fill for backward compatibility
+        
+        if event_type == 'order_filled':
+            await self.process_fill_event(event, symbol)
+        elif event_type == 'order_canceled':
+            await self.process_cancellation_event(event, symbol, current_timestamp)
+        else:
+            self.logger.warning(f"⚠️ Unknown event type: {event_type}")
+            
+    async def process_cancellation_event(self, cancel_event: Dict, symbol: str, current_timestamp: datetime) -> None:
+        """
+        Process a simulated order cancellation event.
+        
+        Args:
+            cancel_event: Cancellation event from broker simulator
+            symbol: Trading symbol
+            current_timestamp: Current bar timestamp
+        """
+        try:
+            order_id = cancel_event['id']
+            cancel_reason = cancel_event.get('cancel_reason', 'unknown')
+            side = cancel_event['side']
+            
+            self.logger.info(f"🔄 Processing {cancel_reason} cancellation for {side.upper()} order {order_id}")
+            
+            # If this was our current order, clear the tracking
+            if self.current_cycle.latest_order_id == order_id:
+                self.current_cycle.latest_order_id = None
+                self.current_cycle.latest_order_created_at = None
+                
+                # For most cancellations, revert to watching status to allow retry
+                if self.current_cycle.status in ['buying', 'selling']:
+                    self.current_cycle.status = 'watching'
+                    self.logger.info(f"🔄 Cycle status reverted to 'watching' after {cancel_reason}")
+                    
+            # Record cancellation for performance tracking
+            self.logger.info(f"📊 Order cancellation recorded: {cancel_reason} - {side.upper()} order after "
+                           f"{(current_timestamp - datetime.fromisoformat(cancel_event['created_at'].replace('Z', '+00:00'))).total_seconds()/60:.1f} minutes")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error processing cancellation event: {e}")
         
     async def process_fill_event(self, fill_event: Dict, symbol: str) -> None:
         """
@@ -650,18 +878,25 @@ class BacktestSimulation:
             current_qty = self.current_cycle.quantity
             current_avg = self.current_cycle.average_purchase_price
             
+            # Track cycle entry for performance metrics
+            if current_qty == 0:
+                # This is the base order - start tracking the cycle
+                self.cycle_entry_timestamp = datetime.now(timezone.utc)
+                self.cycle_entry_price = filled_price
+                is_safety_order = False
+            else:
+                is_safety_order = True
+            
             # Calculate new totals
             new_total_qty = current_qty + filled_qty
             
             if current_qty == 0:
                 # First purchase (base order)
                 new_avg_price = filled_price
-                is_safety_order = False
             else:
                 # Safety order - calculate weighted average
                 total_value = (current_qty * current_avg) + (filled_qty * filled_price)
                 new_avg_price = total_value / new_total_qty
-                is_safety_order = True
             
             # Update cycle state
             self.current_cycle.quantity = new_total_qty
@@ -698,25 +933,38 @@ class BacktestSimulation:
             self.logger.info(f"💰 SELL fill processed: {filled_qty} @ ${filled_price:.2f}")
             self.logger.info(f"💰 Profit: ${total_profit:.2f} ({profit_pct:.2f}%)")
             
-            # Mark cycle as complete
-            self.current_cycle.status = 'complete'
+            # Record completed trade for performance tracking
+            if self.cycle_entry_timestamp and self.cycle_entry_price:
+                completed_trade = CompletedTrade(
+                    asset_symbol=symbol,
+                    entry_timestamp=self.cycle_entry_timestamp,
+                    exit_timestamp=datetime.now(timezone.utc),
+                    entry_price=self.cycle_entry_price,
+                    exit_price=filled_price,
+                    quantity=filled_qty,
+                    realized_pnl=total_profit,
+                    trade_type='take_profit',  # Assume take profit for now
+                    safety_orders_used=self.current_cycle.safety_orders
+                )
+                self.portfolio.record_completed_trade(completed_trade)
+                self.completed_cycles.append(completed_trade)
+            
+            # Mark cycle as complete and start cooldown
+            self.current_cycle.status = 'cooldown'
             self.current_cycle.completed_at = datetime.now(timezone.utc)
             self.current_cycle.quantity = Decimal('0')
             self.current_cycle.sell_price = filled_price
             self.current_cycle.latest_order_id = None
             
-            # Create new cooldown cycle
-            self._create_new_cooldown_cycle()
-            
-            self.logger.info(f"✅ Cycle completed - entering cooldown")
+            self.logger.info(f"⏰ Cycle completed, entering cooldown for {self.asset_config.cooldown_period} seconds")
             
         except Exception as e:
             self.logger.error(f"❌ Error in sell fill processing: {e}")
-            
+
     def _create_new_cooldown_cycle(self):
-        """Create a new cooldown cycle after completion."""
+        """Create a new cycle in cooldown status."""
         self.current_cycle = DcaCycle(
-            id=self.current_cycle.id + 1,  # Increment cycle ID
+            id=self.current_cycle.id + 1,
             asset_id=self.asset_config.id,
             status='cooldown',
             quantity=Decimal('0'),
@@ -726,98 +974,91 @@ class BacktestSimulation:
             latest_order_created_at=None,
             last_order_fill_price=None,
             highest_trailing_price=None,
-            completed_at=None,
+            completed_at=datetime.now(timezone.utc),
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc)
         )
-        
+
     def _fallback_buy_fill_processing(self, order, symbol: str):
-        """Fallback buy fill processing when live handler not available."""
-        self.logger.info(f"🔄 Using fallback buy fill processing for {symbol}")
-        # Basic processing similar to process_buy_fill_backtest_mode
-        # (implementation would be similar to above)
+        """Fallback buy fill processing if live handler unavailable."""
+        self.logger.info(f"🔄 Using fallback BUY fill processing for {symbol}")
+        # Simple fallback logic would go here
         
     def _fallback_sell_fill_processing(self, order, symbol: str):
-        """Fallback sell fill processing when live handler not available."""
-        self.logger.info(f"🔄 Using fallback sell fill processing for {symbol}")
-        # Basic processing similar to process_sell_fill_backtest_mode
-        # (implementation would be similar to above)
+        """Fallback sell fill processing if live handler unavailable."""
+        self.logger.info(f"🔄 Using fallback SELL fill processing for {symbol}")
+        # Simple fallback logic would go here
         
     async def process_strategy_action(self, action: StrategyAction, current_timestamp: datetime, current_bar: Dict[str, Any]) -> None:
         """
-        Process a strategy action by integrating with broker simulator.
+        Process a strategy action by placing simulated orders.
         
         Args:
-            action: Strategy action with intents to process
-            current_timestamp: Current simulation timestamp
-            current_bar: Current bar data for fill simulation
+            action: Strategy action to execute
+            current_timestamp: Current bar timestamp
+            current_bar: Current bar data
         """
         if not action or not action.has_action():
             return
             
-        # Step 1: Process order intent via broker simulator
+        # Process order intent if present
         if action.order_intent:
+            self.logger.info(f"📋 Processing order intent: {action.order_intent.side.value.upper()} "
+                           f"{action.order_intent.order_type.value.upper()}")
+            
+            # Place order via broker simulator
             order_id = self.broker.place_order(action.order_intent, current_timestamp)
-            self.logger.info(f"📋 Order placed with broker simulator: {order_id}")
             
-        # Step 2: Process cycle state update intent
-        if action.cycle_update_intent:
-            intent = action.cycle_update_intent
+            # Update cycle tracking
+            self.current_cycle.latest_order_id = order_id
+            self.current_cycle.latest_order_created_at = current_timestamp
             
-            if intent.new_status:
-                old_status = self.current_cycle.status
-                self.current_cycle.status = intent.new_status
-                self.logger.info(f"🔄 CYCLE STATUS: {old_status} → {intent.new_status}")
-                
-            if intent.new_latest_order_id or action.order_intent:
-                # Set the latest order ID to the one from broker simulator
-                if action.order_intent:
-                    self.current_cycle.latest_order_id = order_id
-                    self.current_cycle.latest_order_created_at = current_timestamp
-                elif intent.new_latest_order_id:
-                    self.current_cycle.latest_order_id = intent.new_latest_order_id
-                    
-            # Apply other cycle updates
-            if intent.new_quantity is not None:
-                self.current_cycle.quantity = intent.new_quantity
-                self.logger.info(f"📊 QUANTITY: {intent.new_quantity}")
-                
-            if intent.new_average_purchase_price is not None:
-                self.current_cycle.average_purchase_price = intent.new_average_purchase_price
-                self.logger.info(f"💰 AVG PRICE: ${intent.new_average_purchase_price}")
-                
-            if intent.new_safety_orders is not None:
-                self.current_cycle.safety_orders = intent.new_safety_orders
-                self.logger.info(f"🛡️ SAFETY ORDERS: {intent.new_safety_orders}")
-                
-            if intent.new_last_order_fill_price is not None:
-                self.current_cycle.last_order_fill_price = intent.new_last_order_fill_price
-                self.logger.info(f"📈 LAST FILL PRICE: ${intent.new_last_order_fill_price}")
+            # Immediately process any fills that might occur in this bar
+            fill_events = self.broker.process_bar_fills(current_bar, current_timestamp)
+            for event in fill_events:
+                if event['id'] == order_id:  # This is our order filling
+                    await self.process_event(event, action.order_intent.symbol, current_timestamp)
+                    break
         
-        # Step 3: Process TTP state update intent
-        if action.ttp_update_intent:
-            intent = action.ttp_update_intent
+        # Process cycle updates if present
+        if action.cycle_update_intent:
+            self._apply_cycle_updates(action.cycle_update_intent)
             
-            if intent.new_status:
-                old_status = self.current_cycle.status
-                self.current_cycle.status = intent.new_status
-                self.logger.info(f"🎯 TTP STATUS: {old_status} → {intent.new_status}")
-                
-            if intent.new_highest_trailing_price is not None:
-                self.current_cycle.highest_trailing_price = intent.new_highest_trailing_price
-                self.logger.info(f"⬆️ TTP PEAK: ${intent.new_highest_trailing_price}")
-                
-        # Step 4: Process any immediate fills from broker simulator
-        fills = self.broker.process_bar_fills(current_bar, current_timestamp)
-        for fill_event in fills:
-            await self.process_fill_event(fill_event, self.asset_config.asset_symbol)
-    
+        # Process TTP updates if present  
+        if action.ttp_update_intent:
+            self._apply_ttp_updates(action.ttp_update_intent)
+            
+    def _apply_cycle_updates(self, update_intent):
+        """Apply cycle state updates from strategy logic."""
+        if update_intent.new_status:
+            old_status = self.current_cycle.status
+            self.current_cycle.status = update_intent.new_status
+            self.logger.info(f"🔄 Cycle status: {old_status} → {update_intent.new_status}")
+            
+        if update_intent.new_quantity is not None:
+            self.current_cycle.quantity = update_intent.new_quantity
+            
+        if update_intent.new_safety_orders is not None:
+            self.current_cycle.safety_orders = update_intent.new_safety_orders
+            
+    def _apply_ttp_updates(self, ttp_intent):
+        """Apply TTP state updates from strategy logic."""
+        if ttp_intent.new_status:
+            old_status = self.current_cycle.status
+            self.current_cycle.status = ttp_intent.new_status
+            self.logger.info(f"🎯 TTP status: {old_status} → {ttp_intent.new_status}")
+            
+        if ttp_intent.new_highest_trailing_price:
+            self.current_cycle.highest_trailing_price = ttp_intent.new_highest_trailing_price
+            self.logger.info(f"⬆️ TTP peak: ${ttp_intent.new_highest_trailing_price}")
+
     def log_cycle_state(self) -> None:
         """Log current cycle state for debugging."""
         self.logger.debug(f"💾 CYCLE STATE: Status={self.current_cycle.status}, "
                          f"Qty={self.current_cycle.quantity}, "
                          f"AvgPrice=${self.current_cycle.average_purchase_price}, "
                          f"SafetyOrders={self.current_cycle.safety_orders}, "
+                         f"LastFill=${self.current_cycle.last_order_fill_price}, "
                          f"TTPPeak=${self.current_cycle.highest_trailing_price}")
 
 
@@ -894,15 +1135,142 @@ def setup_backtest_logging(log_level: str) -> logging.Logger:
     return logging.getLogger('backtest')
 
 
+def calculate_performance_metrics(
+    portfolio: SimulatedPortfolio,
+    completed_trades: List[CompletedTrade],
+    current_prices: Dict[str, Decimal],
+    start_time: datetime,
+    end_time: datetime
+) -> PerformanceMetrics:
+    """
+    Calculate comprehensive performance metrics for the backtest.
+    
+    Args:
+        portfolio: SimulatedPortfolio instance
+        completed_trades: List of completed trades
+        current_prices: Current asset prices for unrealized P/L
+        start_time: Backtest start time
+        end_time: Backtest end time
+        
+    Returns:
+        PerformanceMetrics instance
+    """
+    # Basic metrics from portfolio
+    total_realized_pnl = portfolio.realized_pnl
+    total_unrealized_pnl = portfolio.get_unrealized_pnl(current_prices)
+    final_portfolio_value = portfolio.get_portfolio_value(current_prices)
+    total_fees = portfolio.total_fees
+    
+    # Trade statistics
+    total_trades = len(completed_trades)
+    winning_trades = len([trade for trade in completed_trades if trade.realized_pnl > 0])
+    losing_trades = len([trade for trade in completed_trades if trade.realized_pnl < 0])
+    
+    # Calculate win rate
+    win_rate = Decimal(str(winning_trades)) / Decimal(str(total_trades)) * 100 if total_trades > 0 else Decimal('0')
+    
+    # Calculate average P/L per trade
+    average_pnl_per_trade = total_realized_pnl / Decimal(str(total_trades)) if total_trades > 0 else Decimal('0')
+    
+    # Simple max drawdown calculation (from portfolio value perspective)
+    max_drawdown = Decimal('0')  # Simplified for now - would need historical portfolio values for accurate calculation
+    
+    return PerformanceMetrics(
+        total_realized_pnl=total_realized_pnl,
+        total_unrealized_pnl=total_unrealized_pnl,
+        total_trades=total_trades,
+        winning_trades=winning_trades,
+        losing_trades=losing_trades,
+        win_rate=win_rate,
+        average_pnl_per_trade=average_pnl_per_trade,
+        max_drawdown=max_drawdown,
+        total_fees_paid=total_fees,
+        final_portfolio_value=final_portfolio_value
+    )
+
+
+def display_performance_report(
+    logger: logging.Logger,
+    metrics: PerformanceMetrics,
+    asset_config: DcaAsset,
+    total_bars: int
+) -> None:
+    """
+    Display comprehensive performance report.
+    
+    Args:
+        logger: Logger instance
+        metrics: Performance metrics
+        asset_config: Asset configuration
+        total_bars: Total bars processed
+    """
+    logger.info("=" * 60)
+    logger.info("📈 BACKTESTING PERFORMANCE REPORT")
+    logger.info("=" * 60)
+    
+    # Asset and backtest info
+    logger.info(f"🎯 Asset: {asset_config.asset_symbol}")
+    logger.info(f"📊 Total Bars Processed: {total_bars:,}")
+    logger.info(f"⚙️ Strategy Config: Base=${asset_config.base_order_amount}, "
+               f"Safety=${asset_config.safety_order_amount}, "
+               f"Max Safety={asset_config.max_safety_orders}")
+    logger.info("")
+    
+    # Portfolio performance
+    starting_capital = Decimal('10000.0')  # Default starting capital
+    total_return = metrics.total_pnl
+    total_return_pct = (total_return / starting_capital) * 100
+    
+    logger.info("💰 PORTFOLIO PERFORMANCE:")
+    logger.info(f"   🏛️ Starting Capital: ${starting_capital:.2f}")
+    logger.info(f"   💼 Final Portfolio Value: ${metrics.final_portfolio_value:.2f}")
+    logger.info(f"   📈 Total Return: ${total_return:.2f} ({total_return_pct:.2f}%)")
+    logger.info(f"   ✅ Realized P/L: ${metrics.total_realized_pnl:.2f}")
+    logger.info(f"   📊 Unrealized P/L: ${metrics.total_unrealized_pnl:.2f}")
+    logger.info(f"   💸 Total Fees: ${metrics.total_fees_paid:.2f}")
+    logger.info("")
+    
+    # Trading statistics
+    logger.info("📊 TRADING STATISTICS:")
+    logger.info(f"   🔄 Total Completed Trades: {metrics.total_trades}")
+    logger.info(f"   ✅ Winning Trades: {metrics.winning_trades}")
+    logger.info(f"   ❌ Losing Trades: {metrics.losing_trades}")
+    logger.info(f"   🎯 Win Rate: {metrics.win_rate:.1f}%")
+    logger.info(f"   📈 Average P/L per Trade: ${metrics.average_pnl_per_trade:.2f}")
+    logger.info("")
+    
+    # Performance assessment
+    if metrics.total_trades > 0:
+        if total_return_pct > 0:
+            logger.info("🎉 POSITIVE PERFORMANCE - Strategy was profitable!")
+        elif total_return_pct == 0:
+            logger.info("➡️ NEUTRAL PERFORMANCE - Strategy broke even")
+        else:
+            logger.info("📉 NEGATIVE PERFORMANCE - Strategy lost money")
+            
+        if metrics.win_rate >= 60:
+            logger.info("🏆 EXCELLENT WIN RATE - Very consistent strategy")
+        elif metrics.win_rate >= 50:
+            logger.info("👍 GOOD WIN RATE - Reasonably consistent strategy")
+        else:
+            logger.info("⚠️ LOW WIN RATE - Strategy needs improvement")
+    else:
+        logger.info("⚠️ NO TRADES COMPLETED - Strategy may be too conservative or conditions not met")
+    
+    logger.info("=" * 60)
+
+
 async def main():
-    """Main backtesting function."""
+    """Main backtesting function with Phase 5 enhancements."""
     try:
         # Parse arguments
         args = parse_arguments()
         
         # Setup logging
         logger = setup_backtest_logging(args.log_level)
-        logger.info("🚀 Starting DCA Backtesting Engine - Phase 4")
+        logger.info("🚀 Starting DCA Backtesting Engine - Phase 5")
+        logger.info("   ✨ Features: Broker Simulation, Portfolio Management, Cooldown Management")
+        logger.info("   ✨ Features: Stale Order Cancellation, Performance Reporting")
         
         # Parse dates
         try:
@@ -976,6 +1344,9 @@ async def main():
                 logger.info(f"📊 Processed {bar_counter}/{bar_count} bars "
                            f"({bar_counter/bar_count*100:.1f}%)")
             
+            # Phase 5: Check cooldown expiry first
+            simulation.check_cooldown_expiry(bar['timestamp'])
+            
             # Create market input from bar
             market_input = MarketTickInput(
                 timestamp=bar['timestamp'],
@@ -990,10 +1361,10 @@ async def main():
                            f"OHLC: ${bar['open']:.2f}/${bar['high']:.2f}/"
                            f"${bar['low']:.2f}/${bar['close']:.2f}")
             
-            # Process any pending fills first (before strategy decisions)
-            fills = simulation.broker.process_bar_fills(bar, bar['timestamp'])
-            for fill_event in fills:
-                await simulation.process_fill_event(fill_event, symbol)
+            # Process any pending fills/cancellations first (before strategy decisions)
+            events = simulation.broker.process_bar_fills(bar, bar['timestamp'])
+            for event in events:
+                await simulation.process_event(event, symbol, bar['timestamp'])
             
             # Call strategy functions based on current cycle status
             actions_executed = []
@@ -1049,16 +1420,30 @@ async def main():
             if actions_executed or bar_counter % 1000 == 0:
                 simulation.log_cycle_state()
         
-        # Final summary
+        # Phase 5: Calculate and report performance metrics
         logger.info("✅ Backtest completed!")
         logger.info(f"📊 Total bars processed: {bar_counter}")
         logger.info(f"💾 Final cycle state: Status={simulation.current_cycle.status}, "
                    f"Qty={simulation.current_cycle.quantity}, "
                    f"SafetyOrders={simulation.current_cycle.safety_orders}")
         
+        # Get final prices for unrealized P/L calculation
+        final_prices = {symbol: bar['close']} if 'bar' in locals() else {}
+        
+        # Calculate performance metrics
+        performance = calculate_performance_metrics(
+            portfolio=portfolio,
+            completed_trades=simulation.completed_cycles,
+            current_prices=final_prices,
+            start_time=start_date,
+            end_time=end_date
+        )
+        
+        # Display comprehensive performance report
+        display_performance_report(logger, performance, asset_config, bar_counter)
+        
         # Log portfolio summary with current prices
-        current_prices = {symbol: bar['close']} if 'bar' in locals() else {}
-        portfolio.log_portfolio_summary(current_prices)
+        portfolio.log_portfolio_summary(final_prices)
         
         return 0
         
@@ -1069,5 +1454,4 @@ async def main():
 
 
 if __name__ == '__main__':
-    import asyncio
     exit(asyncio.run(main())) 
