@@ -166,6 +166,9 @@ def setup_logging(
     console_level_int = getattr(logging, console_level.upper(), logging.INFO)
     file_level_int = getattr(logging, file_level.upper(), logging.INFO)
     
+    # Ensure logs directory exists
+    config.log_dir.mkdir(parents=True, exist_ok=True)
+    
     # Create formatters
     if enable_asset_tracking:
         console_formatter = AssetLifecycleFormatter(include_asset_prefix=True)

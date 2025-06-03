@@ -203,7 +203,7 @@ class Config:
     def log_dir(self) -> Path:
         """Directory for log files."""
         log_dir = Path(os.getenv('LOG_DIR', 'logs'))
-        log_dir.mkdir(exist_ok=True)
+        # Don't create directory automatically - let the logging setup handle it
         return log_dir
     
     @property

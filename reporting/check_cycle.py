@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 # Add src directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from utils.db_utils import execute_query
 from utils.alpaca_client_rest import get_trading_client

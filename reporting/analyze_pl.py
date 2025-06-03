@@ -14,7 +14,7 @@ Usage: python analyze_pl.py [interval]
 import sys
 import os
 import argparse
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from utils.db_utils import execute_query
 from decimal import Decimal
