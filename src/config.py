@@ -190,6 +190,39 @@ class Config:
         """True if Discord trading alerts should be sent (separate from system alerts)."""
         return self.discord_notifications_enabled and self._get_bool_env('DISCORD_TRADING_ALERTS_ENABLED', True)
     
+    # Discord Bot Configuration
+    @property
+    def discord_bot_token(self) -> Optional[str]:
+        """Discord bot token for receiving commands."""
+        return os.getenv('DISCORD_BOT_TOKEN')
+    
+    @property
+    def discord_channel_id(self) -> Optional[int]:
+        """Discord channel ID where bot should respond to commands."""
+        channel_id = os.getenv('DISCORD_CHANNEL_ID')
+        return int(channel_id) if channel_id else None
+    
+    @property
+    def discord_admin_user_ids(self) -> list[int]:
+        """List of Discord user IDs allowed to use bot commands."""
+        user_ids_str = os.getenv('DISCORD_ADMIN_USER_IDS', '')
+        if not user_ids_str:
+            return []
+        try:
+            return [int(uid.strip()) for uid in user_ids_str.split(',') if uid.strip()]
+        except ValueError:
+            logger.warning("Invalid DISCORD_ADMIN_USER_IDS format, using empty list")
+            return []
+    
+    @property
+    def discord_bot_enabled(self) -> bool:
+        """True if Discord bot is enabled and configured."""
+        return bool(
+            self.discord_bot_token and 
+            self.discord_channel_id and 
+            self._get_bool_env('DISCORD_BOT_ENABLED', False)
+        )
+    
     # =============================================================================
     # LOGGING CONFIGURATION
     # =============================================================================
@@ -283,6 +316,7 @@ class Config:
         logger.info(f"Dry Run Mode: {self.dry_run_mode}")
         logger.info(f"Email Alerts: {'Enabled' if self.email_alerts_enabled else 'Disabled'}")
         logger.info(f"Discord Alerts: {'Enabled' if self.discord_notifications_enabled else 'Disabled'}")
+        logger.info(f"Discord Bot: {'Enabled' if self.discord_bot_enabled else 'Disabled'}")
         logger.info(f"Log Level: {self.log_level}")
         logger.info(f"Log Directory: {self.log_dir}")
         logger.info("======================================")
