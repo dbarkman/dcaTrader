@@ -99,12 +99,6 @@ def run_command(cmd, logger):
     
     logger.info(f"Command completed with exit code: {result.returncode}")
     
-    # Still print to console for real-time feedback
-    if result.stdout:
-        print(result.stdout, end='')
-    if result.stderr:
-        print(result.stderr, end='', file=sys.stderr)
-    
     return result.returncode
 
 def main():
@@ -131,7 +125,7 @@ def main():
     logger.info(f"Running command: {command}")
 
     # Base pytest command
-    base_cmd = [sys.executable, "-m", "pytest", "tests/"]
+    base_cmd = [sys.executable, "-m", "pytest"]
     
     if command == "all":
         return run_command(base_cmd + ["-v"], logger)

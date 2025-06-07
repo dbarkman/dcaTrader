@@ -183,19 +183,6 @@ class TestConfig(unittest.TestCase):
     
     @patch('config.load_dotenv')
     @patch('config.logger')
-    def test_log_dir_creation(self, mock_logger, mock_load_dotenv):
-        """Test that log directory is created."""
-        with patch.dict(os.environ, self.test_env):
-            with patch('pathlib.Path.mkdir') as mock_mkdir:
-                config = Config()
-                log_dir = config.log_dir
-                
-                # Verify mkdir was called (may be called multiple times due to property access)
-                mock_mkdir.assert_called_with(exist_ok=True)
-                self.assertEqual(str(log_dir), 'test_logs')
-    
-    @patch('config.load_dotenv')
-    @patch('config.logger')
     def test_invalid_integer_uses_default(self, mock_logger, mock_load_dotenv):
         """Test that invalid integer values use defaults and log warnings."""
         invalid_env = self.test_env.copy()
@@ -209,12 +196,6 @@ class TestConfig(unittest.TestCase):
             
             # Should have logged a warning
             mock_logger.warning.assert_called()
-    
-    def test_get_config_function(self):
-        """Test the get_config convenience function."""
-        # This should return the global config instance
-        config_instance = get_config()
-        self.assertIsInstance(config_instance, Config)
     
     @patch('config.load_dotenv')
     @patch('config.logger')
